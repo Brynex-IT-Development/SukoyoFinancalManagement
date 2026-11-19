@@ -1257,6 +1257,12 @@ export const createBill = async (req, res) => {
     
     const bill = await Bill.create(billData);
 
+    // Reply as soon as the bill is stored. The price sync / stock / vendor updates
+    // below can take longer than the client or host (Render) will wait, which left the
+    // UI stuck on "Saving…" even though the bill was already saved. They keep running
+    // after the response; any failure is logged (see catch → headersSent).
+    res.status(201).json(bill);
+
     // Sync item pricing back to ItemGroup and ShoeItem
     if (billData.items && Array.isArray(billData.items)) {
       await syncItemPricesFromBill(billData.items);
@@ -1450,9 +1456,12 @@ export const createBill = async (req, res) => {
         console.log(`✅ Updated vendor balance - increased payables by ${billData.finalTotal}`);
       }
     }
-    
-    res.status(201).json(bill);
   } catch (error) {
+    if (res.headersSent) {
+      // Bill was saved and returned; a post-save step (stock/vendor sync) failed.
+      console.error("Create bill: post-save processing failed:", error);
+      return;
+    }
     console.error("Create bill error:", error);
     console.error("Error details:", {
       name: error.name,

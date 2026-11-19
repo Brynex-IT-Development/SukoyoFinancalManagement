@@ -1553,6 +1553,9 @@ const NewBillForm = ({ billId, isEditMode = false }) => {
     // the vendor code is still extracted and stored separately.
     const fullName = String(it?.itemName || "").replace(/\s{2,}/g, " ").trim();
     const { vendorCode } = cleanItemNameAndVendor(fullName);
+    const productCode = getNextUniqueProductCode();
+    // Margin % so that cost + cost*% = MRP (matches the manual percentage formula).
+    const pct = rate > 0 && mrp > 0 ? (((mrp - rate) / rate) * 100).toFixed(2) : "";
     return {
       id: Date.now() + Math.floor(Math.random() * 100000),
       item: fullName,
@@ -1561,15 +1564,15 @@ const NewBillForm = ({ billId, isEditMode = false }) => {
       itemData: null,
       itemDescription: fullName,
       category: "BR code",
-      sku: getNextUniqueProductCode(),
-      itemCode: "",
+      sku: productCode,
+      itemCode: productCode,
       hsnCode: it?.hsnCode || "",
       size: "",
       quantity: qty.toFixed(2),
       rate: rate.toFixed(2),
       sellingPrice: mrp.toFixed(2),
       mrp: mrp.toFixed(2),
-      percentage: "",
+      percentage: pct,
       tax: "",
       customer: "",
       amount: amount.toFixed(2),
@@ -1606,32 +1609,77 @@ const NewBillForm = ({ billId, isEditMode = false }) => {
         if (billFileInputRef.current) billFileInputRef.current.value = "";
         return;
       }
-      // ~8MB guard (backend JSON limit is 10MB; base64 inflates ~33%)
-      if (file.size > 7 * 1024 * 1024) {
-        alert("File is too large. Please upload an image/PDF under 7 MB.");
+      const isPdfFile = file.type === "application/pdf";
+      // PDFs are sent as-is (backend JSON limit is 10MB; base64 inflates ~33%).
+      // Images are downscaled below, so large phone photos are fine.
+      if ((isPdfFile && file.size > 7 * 1024 * 1024) || file.size > 30 * 1024 * 1024) {
+        alert(`File is too large. Please upload ${isPdfFile ? "a PDF under 7 MB" : "an image under 30 MB"}.`);
         if (billFileInputRef.current) billFileInputRef.current.value = "";
         return;
       }
 
       setScanningBillFile(true);
       try {
-        const base64 = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const result = String(reader.result || "");
-            const comma = result.indexOf(",");
-            resolve(comma !== -1 ? result.slice(comma + 1) : result);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
+        const readAsBase64 = (blob) =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = String(reader.result || "");
+              const comma = result.indexOf(",");
+              resolve(comma !== -1 ? result.slice(comma + 1) : result);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+
+        // Anthropic rejects images over 5 MB and works best around ~2000px, so
+        // phone photos are resized and re-encoded as JPEG before upload.
+        const shrinkImage = async (imgFile) => {
+          const url = URL.createObjectURL(imgFile);
+          try {
+            const img = await new Promise((resolve, reject) => {
+              const el = new Image();
+              el.onload = () => resolve(el);
+              el.onerror = reject;
+              el.src = url;
+            });
+            const MAX = 2000;
+            const scale = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.round(img.naturalWidth * scale);
+            canvas.height = Math.round(img.naturalHeight * scale);
+            const ctx = canvas.getContext("2d");
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+            return blob || imgFile;
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        };
+
+        let uploadBlob = file;
+        let uploadType = file.type;
+        if (!isPdfFile) {
+          try {
+            const shrunk = await shrinkImage(file);
+            if (shrunk && shrunk !== file) {
+              uploadBlob = shrunk;
+              uploadType = "image/jpeg";
+            }
+          } catch (shrinkErr) {
+            console.warn("Image resize failed, sending original:", shrinkErr);
+          }
+        }
+        const base64 = await readAsBase64(uploadBlob);
 
         const resp = await fetch(`${API_URL}/api/purchase/bills/extract-from-file`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileData: base64, mediaType: file.type }),
+          body: JSON.stringify({ fileData: base64, mediaType: uploadType }),
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => ({ success: false, message: `Server error (${resp.status}). Please try again.` }));
 
         if (!resp.ok || !data?.success) {
           alert(data?.message || "Could not read the bill. Please try a clearer image.");
@@ -3389,7 +3437,7 @@ ${storeNameZpl}^FO81,21
           r.category = "BR code";
         }
 
-        const itemCode = (r.itemCode || r.itemData?.itemCode || r.itemData?.sku || "").trim();
+        const itemCode = String(r.itemCode || r.itemData?.itemCode || r.itemData?.sku || r.sku || "").trim();
         if (!itemCode) {
           alert(`Row ${rowNum} (${itemName}): Item Code is mandatory.`);
           setSaving(false);
