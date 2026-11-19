@@ -6,6 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "cross-env NODE_ENV=production node --max-old-space-size=2048 server.js",
+    "build": "echo \"API: no build step needed\"",
     "dev": "cross-env NODE_ENV=development node --max-old-space-size=2048 server.js",
     "test:stock": "node test-purchase-receive-stock.js",
     "check-transfers": "node scripts/check-transfer-orders.js",
@@ -20,6 +21,7 @@
     "body-parser": "^1.20.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
+    "cross-env": "^7.0.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "mongoose": "^8.12.2",
@@ -32,8 +34,5 @@
     "swagger": "^0.7.5",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1"
-  },
-  "devDependencies": {
-    "cross-env": "^7.0.3"
   }
 }
