@@ -155,7 +155,10 @@ const ItemFormNew = () => {
   const handleSave = async () => {
     const req = isEdit
       ? { productName: 'Enter product name' }
-      : { itemCode: 'Enter item code', productName: 'Enter product name', printName: 'Enter print name', category: 'Select Category', brand: 'Select Brand' };
+      : {
+          ...(f.autoGenerate ? {} : { itemCode: 'Enter item code' }),
+          productName: 'Enter product name',
+        };
     const errs = {};
     Object.entries(req).forEach(([k, msg]) => { if (!String(f[k]).trim()) errs[k] = msg; });
     setErrors(errs);
@@ -201,9 +204,63 @@ const ItemFormNew = () => {
       return;
     }
 
-    // New item (UI shell) — wire to your create API here.
-    console.log('New item payload', { ...f, description });
-    alert('Item details captured. (Hook this up to your create API in handleSave.)');
+    // New item → POST to the standalone item create API.
+    let currentUser = {};
+    try { currentUser = JSON.parse(localStorage.getItem('rootfinuser')) || {}; } catch { /* ignore */ }
+    const createdBy = currentUser.username || currentUser.locName || 'System';
+    const num = (v) => (v !== '' && v != null && Number.isFinite(Number(v)) ? Number(v) : 0);
+    const openingQty = num(f.openingQty);
+
+    const payload = {
+      type: 'goods',
+      itemName: f.productName.trim(),
+      printName: (f.printName || f.productName).trim(),
+      // Empty SKU lets the backend auto-generate a unique one.
+      sku: f.autoGenerate ? '' : f.itemCode.trim(),
+      itemCode: f.autoGenerate ? '' : f.itemCode.trim(),
+      unit: f.unit,
+      brand: f.brand,
+      hsnCode: f.hsnCode,
+      // Schema only allows shirt/shoe/other for `category`; keep the picked label separately.
+      category: 'other',
+      itemCategory: f.category,
+      subCategory: f.subCategory,
+      taxRateIntra: f.salesTax,
+      taxRateInter: f.salesTax,
+      salesDescription: f.shortDesc,
+      description,
+      costPrice: num(f.purchasePrice),
+      sellingPrice: num(f.sellingPrice),
+      mrp: num(f.mrp),
+      reorderPoint: f.minQty !== '' ? String(f.minQty) : '',
+      weight: f.netWeight !== '' ? String(f.netWeight) : '',
+      stock: openingQty,
+      openingStock: openingQty,
+      trackInventory: true,
+      trackingMethod: f.manageBatch ? 'batch' : 'none',
+      createdBy,
+      changedBy: createdBy,
+      userLocName: currentUser.locName || '',
+    };
+
+    try {
+      setSaving(true);
+      const res = await fetch(`${API_ROOT}/api/shoe-sales/items`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.message || `Create failed (${res.status})`);
+      if (res.status === 200) {
+        alert(`An item named "${data?.itemName}" already exists (SKU ${data?.sku}). Opening it.`);
+      }
+      navigate(data?._id ? `/shoe-sales/items/${data._id}` : '/shoe-sales/items');
+    } catch (e) {
+      alert('Failed to create item: ' + e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (

@@ -57,7 +57,10 @@ const Login = () => {
           to { opacity: 1; transform: translateY(0); }
         }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .rise { opacity: 0; animation: riseIn .7s cubic-bezier(.2,.7,.2,1) forwards; }
+        /* No base opacity:0 — if animations are disabled (reduced motion / battery saver
+           on phones) the form must still be visible. "both" applies the 0% frame during the delay. */
+        .rise { animation: riseIn .7s cubic-bezier(.2,.7,.2,1) both; }
+        @media (prefers-reduced-motion: reduce) { .rise { opacity: 1 !important; transform: none !important; } }
         .d1 { animation-delay: .05s; } .d2 { animation-delay: .15s; }
         .d3 { animation-delay: .25s; } .d4 { animation-delay: .35s; }
         .d5 { animation-delay: .45s; } .d6 { animation-delay: .55s; }

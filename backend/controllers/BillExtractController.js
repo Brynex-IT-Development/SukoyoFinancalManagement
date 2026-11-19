@@ -38,7 +38,11 @@ Rules:
  */
 export const extractBillFromFile = async (req, res) => {
   try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    // Hosting dashboards (Render etc.) often keep stray quotes/spaces/newlines in pasted values.
+    const apiKey = (process.env.ANTHROPIC_API_KEY || "")
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .trim();
     if (!apiKey) {
       return res.status(500).json({
         success: false,
