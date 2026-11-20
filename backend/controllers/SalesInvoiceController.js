@@ -7,6 +7,42 @@ import Transaction from "../model/Transaction.js";
 import User from "../model/UserModel.js";
 import mongoose from "mongoose";
 import { assignVendorsToLines, applyVendorAllocations } from "../utils/vendorStock.js";
+import {
+  HttpError, UndoStack, findOrCreateCustomer, getLoyaltySettings, planRedemptions, applyRedemptions,
+  computeEarn, postEarn, reverseInvoiceLoyalty, previewReturn, applyReturnRefund, snapshotLineCosts, toId,
+} from "../utils/redemptions.js";
+import { round2, normalizePhone } from "../utils/retailMath.js";
+
+// Fields only the server may set (anything the client sends for these is ignored)
+const SERVER_ONLY_FIELDS = [
+  "customerId", "totalRedeemed", "amountDue", "loyaltyPointsEarned", "loyaltyPointsUsed", "earnBase",
+  "loyaltyApplied", "loyaltyBaseTotal", "loyaltyPointsRestored", "loyaltyPointsReversed", "refundBreakdown",
+];
+const stripServerFields = (body) => { for (const f of SERVER_ONLY_FIELDS) delete body[f]; };
+
+const httpErrorResponse = (res, err) => res.status(err.status).json({ message: err.message, ...err.extra });
+
+const hasValue = (v) => v !== undefined && v !== null && v !== "";
+
+/**
+ * Money received must match the amount due (bill total minus redemptions).
+ * Rejects a screen that previewed a different amount due (409) and a split that does not add up (400).
+ */
+const validatePayment = (inv, clientAmountDue) => {
+  const due = round2(inv.amountDue);
+  if (hasValue(clientAmountDue) && Math.abs(round2(Number(clientAmountDue)) - due) > 0.01) {
+    throw new HttpError(409, `Amount due has changed: the server calculated ₹${due.toFixed(2)} but the screen showed ₹${round2(Number(clientAmountDue)).toFixed(2)}. Please re-check the redemptions.`, { code: "AMOUNT_DUE_MISMATCH", amountDue: due });
+  }
+  if (inv.isSplitPayment && inv.splitPaymentAmounts) {
+    const s = inv.splitPaymentAmounts;
+    const paid = round2(["cash", "bank", "upi", "rbl"].reduce((t, k) => t + (parseFloat(s[k]) || 0), 0));
+    if (Math.abs(paid - due) > 0.01) {
+      throw new HttpError(400, `Split payment adds up to ₹${paid.toFixed(2)} but the amount due is ₹${due.toFixed(2)}.`);
+    }
+  } else if (due > 0.004 && !hasValue(inv.paymentMethod)) {
+    throw new HttpError(400, `Select a payment method for the ₹${due.toFixed(2)} still due.`);
+  }
+};
 
 // ─── Stock helpers ──────────────────────────────────────────────────────────
 const RETURN_CATEGORIES = ["return", "refund", "cancel"];
@@ -51,9 +87,15 @@ const allocatePaymentAmounts = (invoice) => {
   const isReturnRefundCancel = ["return", "refund", "cancel"].includes(categoryLower);
   const finalTotalValue = parseFloat(invoice.finalTotal || 0);
   const isNegativeAmount = finalTotalValue < 0;
-  
+
+  // Only money actually received (or refunded) goes into cash/bank/upi/rbl: amountDue is the
+  // bill total minus loyalty/store-credit redemptions (on a return: the cash part of the refund).
+  // Invoices created before redemptions existed have no amountDue → the full total, as before.
+  const moneyValue = hasValue(invoice.amountDue) && Number.isFinite(Number(invoice.amountDue))
+    ? Number(invoice.amountDue)
+    : finalTotalValue;
   // For returns/refunds, use absolute value for payment allocation but keep transaction amounts negative
-  const amountToAllocate = Math.abs(finalTotalValue).toString();
+  const amountToAllocate = round2(Math.abs(moneyValue)).toString();
   
   // Handle split payment first
   if (invoice.isSplitPayment && invoice.splitPaymentAmounts) {
@@ -95,7 +137,10 @@ const allocatePaymentAmounts = (invoice) => {
     });
   }
   
-  return { cash, bank, upi, rbl, paymentMethodForTransaction };
+  // Part of the total settled without money (points, store credit; on a return the part not paid out in cash)
+  const redeemedAmount = round2(Math.max(0, Math.abs(finalTotalValue) - Math.abs(moneyValue)));
+
+  return { cash, bank, upi, rbl, paymentMethodForTransaction, redeemedAmount };
 };
  
 // Create a new sales invoice
@@ -179,8 +224,64 @@ export const createSalesInvoice = async (req, res) => {
     invoiceData.createdBy = userId;
     invoiceData.storeId = user.storeId;
 
-    // Decide which vendor each sold piece comes from (cashier choice, else oldest stock first)
     const isReturnInvoice = isReturnCategory(invoiceData.category);
+
+    // ── CUSTOMER & REDEMPTIONS (validated before anything is changed) ──
+    const requestedRedemptions = invoiceData.redemptions;
+    const clientAmountDue = invoiceData.amountDue;
+    const refundMode = invoiceData.refundMode === "storeCredit" ? "storeCredit" : "cash";
+    delete invoiceData.redemptions;
+    delete invoiceData.refundMode;
+    stripServerFields(invoiceData);
+    invoiceData._id = new mongoose.Types.ObjectId(); // known up front so ledger rows can point at it
+
+    let customer = null, plan = null, earn = null, original = null, split = null;
+    try {
+      if (isReturnInvoice) {
+        if (Array.isArray(requestedRedemptions) && requestedRedemptions.length) {
+          throw new HttpError(400, "Loyalty points and store credit cannot be used on a return.");
+        }
+        const origId = toId(invoiceData.originalInvoiceId);
+        if (origId) original = await SalesInvoice.findById(origId).lean();
+        if (original?.customerId) {
+          invoiceData.customerId = original.customerId;
+        } else if (refundMode === "storeCredit") {
+          customer = await findOrCreateCustomer({ name: invoiceData.customer, phone: invoiceData.customerPhone, locCode: invoiceData.locCode, createdBy: userId });
+          invoiceData.customerId = customer?._id || null;
+        }
+        split = previewReturn(original, invoiceData.finalTotal, refundMode);
+        if (split.storeCreditAmount > 0 && !invoiceData.customerId) {
+          throw new HttpError(400, "A refund as store credit needs the customer's phone number.");
+        }
+        invoiceData.amountDue = -split.cashRefund;
+        invoiceData.totalRedeemed = round2(split.returnValue - split.cashRefund);
+        await snapshotLineCosts(invoiceData.lineItems, original?.lineItems || []);
+      } else {
+        customer = await findOrCreateCustomer({ name: invoiceData.customer, phone: invoiceData.customerPhone, locCode: invoiceData.locCode, createdBy: userId });
+        invoiceData.customerId = customer?._id || null;
+        const settings = await getLoyaltySettings(invoiceData.locCode);
+        const finalTotal = round2(Number(invoiceData.finalTotal) || 0);
+        plan = await planRedemptions({ requested: requestedRedemptions, finalTotal, customer, settings });
+        earn = computeEarn({ customer, finalTotal, plan, settings });
+        Object.assign(invoiceData, {
+          redemptions: plan.redemptions,
+          totalRedeemed: plan.totalRedeemed,
+          amountDue: round2(finalTotal - plan.totalRedeemed),
+          loyaltyPointsUsed: plan.loyaltyPointsUsed,
+          loyaltyPointsEarned: earn.earned,
+          earnBase: earn.earnBase,
+          loyaltyApplied: true,
+          loyaltyBaseTotal: finalTotal,
+        });
+        validatePayment(invoiceData, clientAmountDue);
+        await snapshotLineCosts(invoiceData.lineItems);
+      }
+    } catch (err) {
+      if (err instanceof HttpError) return httpErrorResponse(res, err);
+      throw err;
+    }
+
+    // Decide which vendor each sold piece comes from (cashier choice, else oldest stock first)
     if (!isReturnInvoice && Array.isArray(invoiceData.lineItems)) {
       await assignVendorsToLines(invoiceData.lineItems);
     }
@@ -201,11 +302,27 @@ export const createSalesInvoice = async (req, res) => {
     invoiceData.stockApplied = true;
     invoiceData.stockWarehouse = warehouse;
 
+    // Order: stock (done) → redemptions → save invoice → points earned / return refund.
+    // Any failure undoes every earlier step, so nothing is left half-applied.
+    const undo = new UndoStack();
+    undo.push("stock", () => undoMovements(movements));
     let invoice;
     try {
+      if (!isReturnInvoice && plan.redemptions.length) {
+        await applyRedemptions({ plan, customer, invoiceId: invoiceData._id, invoiceNumber: finalInvoiceNumber, createdBy: userId, undo });
+      }
       invoice = await SalesInvoice.create(invoiceData);
+      undo.push("invoice", () => SalesInvoice.deleteOne({ _id: invoice._id }));
+      if (!isReturnInvoice) {
+        await postEarn({ customer, earned: earn.earned, earnBase: earn.earnBase, invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber, createdBy: userId, undo });
+      } else {
+        const breakdown = await applyReturnRefund({ original, returnInvoice: invoice, split, refundMode, createdBy: userId, undo });
+        await SalesInvoice.updateOne({ _id: invoice._id }, { $set: { refundBreakdown: breakdown } });
+        invoice.refundBreakdown = breakdown;
+      }
     } catch (saveErr) {
-      await undoMovements(movements); // invoice not saved → put the stock back
+      await undo.rollback(); // put back stock, balances and remove the invoice
+      if (saveErr instanceof HttpError) return httpErrorResponse(res, saveErr);
       throw saveErr;
     }
 
@@ -257,8 +374,8 @@ const createFinancialTransaction = async (invoice) => {
     const transactionType = invoice.category || "Receivable";
     
     // ✅ Use helper function to allocate payment amounts
-    const { cash, bank, upi, rbl, paymentMethodForTransaction } = allocatePaymentAmounts(invoice);
-    
+    const { cash, bank, upi, rbl, paymentMethodForTransaction, redeemedAmount } = allocatePaymentAmounts(invoice);
+
     // Get location code from invoice or use default
     const locCode = invoice.locCode || "001"; // Default location code
     
@@ -284,7 +401,8 @@ const createFinancialTransaction = async (invoice) => {
       locCode: locCode,
       quantity: invoice.lineItems?.length.toString() || "0",
       customerName: invoice.customer,
-      totalTransaction: invoice.finalTotal
+      totalTransaction: invoice.finalTotal,
+      redeemedAmount,
     };
 
     // Save transaction to MongoDB
@@ -321,9 +439,9 @@ const updateFinancialTransaction = async (invoice) => {
     const transactionType = invoice.category || "Receivable";
     
     // ✅ Use helper function to allocate payment amounts
-    const { cash, bank, upi, rbl, paymentMethodForTransaction } = allocatePaymentAmounts(invoice);
-    
-    console.log("🔄 Payment allocation result:", { cash, bank, upi, rbl, paymentMethodForTransaction });
+    const { cash, bank, upi, rbl, paymentMethodForTransaction, redeemedAmount } = allocatePaymentAmounts(invoice);
+
+    console.log("🔄 Payment allocation result:", { cash, bank, upi, rbl, paymentMethodForTransaction, redeemedAmount });
     
     // Get location code from invoice or use existing
     const locCode = invoice.locCode || existingTransaction.locCode || "001";
@@ -346,7 +464,8 @@ const updateFinancialTransaction = async (invoice) => {
       locCode: locCode,
       quantity: invoice.lineItems?.length.toString() || "0",
       customerName: invoice.customer,
-      totalTransaction: invoice.finalTotal
+      totalTransaction: invoice.finalTotal,
+      redeemedAmount,
     };
 
     // Update transaction in MongoDB
@@ -375,6 +494,27 @@ const updateFinancialTransaction = async (invoice) => {
   } catch (error) {
     console.error("❌ Error updating financial transaction:", error);
     throw error;
+  }
+};
+
+// How a return of `returnValue` from this invoice would be refunded (cash vs store credit,
+// points restored/reversed). Read-only; the same calculation runs when the return is saved.
+export const previewInvoiceReturn = async (req, res) => {
+  try {
+    const original = toId(req.params.id) ? await SalesInvoice.findById(req.params.id).lean() : null;
+    if (!original) return res.status(404).json({ message: "Sales invoice not found" });
+    const returnValue = Math.abs(Number(req.body?.returnValue) || 0);
+    const refundMode = req.body?.refundMode === "storeCredit" ? "storeCredit" : "cash";
+    const split = previewReturn(original, returnValue, refundMode);
+    res.json({
+      ...split,
+      refundMode,
+      hasCustomer: !!original.customerId || !!normalizePhone(original.customerPhone),
+      redemptions: original.redemptions || [],
+    });
+  } catch (error) {
+    console.error("Return preview error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
@@ -570,9 +710,32 @@ export const updateSalesInvoice = async (req, res) => {
     delete req.body.stockApplied;
     delete req.body.stockWarehouse;
 
+    // Redemption figures are computed here, never taken from the client
+    const requestedRedemptions = req.body.redemptions;
+    const clientAmountDue = req.body.amountDue;
+    delete req.body.redemptions;
+    delete req.body.refundMode;
+    stripServerFields(req.body);
+
     // A return-triggered update (original invoice trimmed after a return) must NOT move stock:
     // the separate RTN- invoice already put the returned pieces back.
     const isReturnUpdate = req.body.returnStatus === "partial" || req.body.returnStatus === "full";
+    const isSaleEdit = !isReturnUpdate && !isReturnCategory(oldInvoice.category) && !isReturnCategory(req.body.category ?? oldInvoice.category);
+
+    // Checks that need no writes, so a bad edit is refused before stock moves
+    const sameRedemptions = (a, b) => JSON.stringify((a || []).map((r) => [r.type, String(r.refId || r.code || ""), Number(r.points) || 0, round2(r.amount)]))
+      === JSON.stringify((b || []).map((r) => [r.type, String(r.refId || r.code || ""), Number(r.points) || 0, round2(r.amount)]));
+    if (isSaleEdit && requestedRedemptions !== undefined) {
+      if (!oldInvoice.loyaltyApplied && Array.isArray(requestedRedemptions) && requestedRedemptions.length) {
+        return res.status(409).json({ message: "This invoice was created before loyalty and store credit existed, so redemptions cannot be added to it." });
+      }
+      if (oldInvoice.loyaltyApplied && ["partial", "full"].includes(oldInvoice.returnStatus)
+        && !sameRedemptions(requestedRedemptions, oldInvoice.redemptions)) {
+        return res.status(409).json({ message: "Items on this invoice were already returned, so its loyalty points and store credit can no longer be changed." });
+      }
+    }
+    // Loyalty is redone on edit only for invoices created with it and not yet (partly) returned
+    const redoLoyalty = isSaleEdit && oldInvoice.loyaltyApplied && !["partial", "full"].includes(oldInvoice.returnStatus);
 
     // ── STOCK: apply the difference between the old and the new invoice ──
     // Done as "undo old lines, apply new lines" so changes of quantity, item,
@@ -603,25 +766,64 @@ export const updateSalesInvoice = async (req, res) => {
       req.body.stockWarehouse = newWh;
     }
 
+    const undo = new UndoStack();
+    undo.push("stock: re-apply old lines", () => undoMovements(undoOld));
+    undo.push("stock: remove new lines", () => undoMovements(applyNew));
+
     let invoice;
+    let customer = null, earn = null;
     try {
+      if (redoLoyalty) {
+        // Reverse what the invoice applied, then apply the edited version from fresh balances
+        await reverseInvoiceLoyalty({ invoice: oldInvoice, createdBy: userId, reason: `Invoice ${oldInvoice.invoiceNumber} edited`, undo });
+        const merged = { ...oldInvoice, ...req.body };
+        customer = await findOrCreateCustomer({ name: merged.customer, phone: merged.customerPhone, locCode: merged.locCode, createdBy: userId });
+        const settings = await getLoyaltySettings(merged.locCode);
+        const finalTotal = round2(Number(merged.finalTotal) || 0);
+        const plan = await planRedemptions({
+          requested: requestedRedemptions !== undefined ? requestedRedemptions : oldInvoice.redemptions,
+          finalTotal, customer, settings,
+        });
+        earn = computeEarn({ customer, finalTotal, plan, settings });
+        Object.assign(req.body, {
+          customerId: customer?._id || null,
+          redemptions: plan.redemptions,
+          totalRedeemed: plan.totalRedeemed,
+          amountDue: round2(finalTotal - plan.totalRedeemed),
+          loyaltyPointsUsed: plan.loyaltyPointsUsed,
+          loyaltyPointsEarned: earn.earned,
+          earnBase: earn.earnBase,
+          loyaltyBaseTotal: finalTotal,
+          loyaltyPointsRestored: 0,
+          loyaltyPointsReversed: 0,
+        });
+        validatePayment({ ...merged, ...req.body }, clientAmountDue);
+        await applyRedemptions({ plan, customer, invoiceId: oldInvoice._id, invoiceNumber: oldInvoice.invoiceNumber, createdBy: userId, undo });
+      } else if (isSaleEdit && !oldInvoice.loyaltyApplied && req.body.customerPhone !== undefined) {
+        // Older invoice: link it to the customer record when the phone is valid (no points, no checks)
+        const phone = normalizePhone(req.body.customerPhone);
+        if (phone) {
+          const c = await findOrCreateCustomer({ name: req.body.customer ?? oldInvoice.customer, phone, locCode: oldInvoice.locCode, createdBy: userId });
+          req.body.customerId = c?._id || null;
+        }
+      }
+      if (Array.isArray(req.body.lineItems)) await snapshotLineCosts(req.body.lineItems, oldInvoice.lineItems || []);
+
       invoice = await SalesInvoice.findByIdAndUpdate(
         id,
         req.body,
         { new: true, runValidators: true }
       );
-    } catch (updateErr) {
-      await undoMovements(applyNew);
-      await undoMovements(undoOld);
-      throw updateErr;
-    }
+      if (!invoice) throw new HttpError(404, "Sales invoice not found");
+      undo.push("restore invoice", () => SalesInvoice.replaceOne({ _id: oldInvoice._id }, oldInvoice));
 
-    if (!invoice) {
-      await undoMovements(applyNew);
-      await undoMovements(undoOld);
-      return res
-        .status(404)
-        .json({ message: "Sales invoice not found" });
+      if (redoLoyalty) {
+        await postEarn({ customer, earned: earn.earned, earnBase: earn.earnBase, invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber, createdBy: userId, undo });
+      }
+    } catch (updateErr) {
+      await undo.rollback();
+      if (updateErr instanceof HttpError) return httpErrorResponse(res, updateErr);
+      throw updateErr;
     }
 
     // ✅ UPDATE CORRESPONDING FINANCIAL TRANSACTION
@@ -744,6 +946,22 @@ export const deleteSalesInvoice = async (req, res) => {
       }
     }
 
+    // ✅ GIVE BACK loyalty points / store credit the invoice used and take back points it earned
+    const undo = new UndoStack();
+    undo.push("stock", () => undoMovements(restored));
+    try {
+      await reverseInvoiceLoyalty({
+        invoice: invoiceToDelete.toObject(),
+        createdBy: userId || "",
+        reason: `Invoice ${invoiceToDelete.invoiceNumber} deleted`,
+        undo,
+      });
+    } catch (loyaltyErr) {
+      await undo.rollback();
+      if (loyaltyErr instanceof HttpError) return httpErrorResponse(res, loyaltyErr);
+      throw loyaltyErr;
+    }
+
     // ✅ DELETE ASSOCIATED TRANSACTION RECORD (only for non-return invoices)
     try {
       console.log(`🔍 Deleting transaction for invoice: "${invoiceToDelete.invoiceNumber}"`);
@@ -762,7 +980,7 @@ export const deleteSalesInvoice = async (req, res) => {
     try {
       await SalesInvoice.findByIdAndDelete(id);
     } catch (deleteErr) {
-      await undoMovements(restored); // invoice still exists → take the stock out again
+      await undo.rollback(); // invoice still exists → take the stock out again and re-apply its redemptions
       throw deleteErr;
     }
 

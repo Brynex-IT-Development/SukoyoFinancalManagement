@@ -131,6 +131,10 @@ const transactionSchema = new mongoose.Schema(
     subCategory1:    { type: String, default: "" },
     totalTransaction:{ type: Number, default: 0 },
     discountAmount:  { type: Number, default: 0 },
+    // Part of the bill settled without money changing hands (loyalty points, store credit,
+    // gift card, voucher; on a return: the part refunded as store credit or not refundable).
+    // cash/bank/upi/rbl only hold real money, so closing never expects this amount in the drawer.
+    redeemedAmount:  { type: Number, default: 0 },
 
     /* Edit tracking fields */
     editedBy:     { type: String },

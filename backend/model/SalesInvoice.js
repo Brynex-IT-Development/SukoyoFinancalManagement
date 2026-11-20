@@ -104,8 +104,49 @@ const salesInvoiceSchema = new mongoose.Schema(
         rate: Number,
         tax: String,
         amount: Number,
+        // Item cost at the time of sale (snapshot for profit reports)
+        costPrice: Number,
       },
     ],
+    // ── Customer & redemptions (loyalty / store credit / gift card / voucher) ──
+    customerId: { type: mongoose.Schema.Types.ObjectId, ref: "Customer", default: null },
+    redemptions: [
+      {
+        _id: false,
+        type: { type: String, enum: ["loyalty", "storeCredit", "giftCard", "voucher"] },
+        refId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        code: { type: String, default: "" },
+        points: { type: Number, default: 0 },
+        amount: { type: Number, default: 0 },
+      },
+    ],
+    totalRedeemed: { type: Number, default: 0 },
+    // Money actually to be received = finalTotal − totalRedeemed (negative = refund paid out on a return)
+    amountDue: { type: Number },
+    loyaltyPointsEarned: { type: Number, default: 0 },
+    loyaltyPointsUsed: { type: Number, default: 0 },
+    earnBase: { type: Number, default: 0 },
+    // true once loyalty/redemptions were processed for this invoice (absent on older invoices)
+    loyaltyApplied: { type: Boolean },
+    // finalTotal at the time redemptions were applied. Return proportions use this, because
+    // the invoice's own finalTotal is reduced after a partial return.
+    loyaltyBaseTotal: { type: Number },
+    // How much of the above later returns have already restored / reversed (caps rounding over several returns)
+    loyaltyPointsRestored: { type: Number, default: 0 },
+    loyaltyPointsReversed: { type: Number, default: 0 },
+    // On a return invoice: how the refund was paid out
+    refundBreakdown: {
+      mode: { type: String, enum: ["cash", "storeCredit"] },
+      returnValue: Number,
+      refundable: Number,
+      cashRefund: Number,
+      storeCreditAmount: Number,
+      nonRefundable: Number,
+      pointsRestored: Number,
+      pointsReversed: Number,
+      storeCreditId: { type: mongoose.Schema.Types.ObjectId },
+      storeCreditNumber: String,
+    },
     customerNotes: {
       type: String,
       default: "Thanks for your business.",
@@ -205,6 +246,7 @@ salesInvoiceSchema.index({ status: 1, invoiceDate: -1 });
 salesInvoiceSchema.index({ warehouse: 1, createdAt: -1 });
 salesInvoiceSchema.index({ branch: 1, createdAt: -1 });
 salesInvoiceSchema.index({ customer: 1 });
+salesInvoiceSchema.index({ customerId: 1, invoiceDate: -1 });
 salesInvoiceSchema.index({ createdAt: -1 });
 salesInvoiceSchema.index({ invoiceDate: -1 });
 
