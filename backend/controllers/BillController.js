@@ -5,6 +5,7 @@ import Vendor from "../model/Vendor.js";
 import mongoose from "mongoose";
 import { logVendorActivity, getOriginatorName } from "../utils/vendorHistoryLogger.js";
 import { updateMonthlyStockForPurchase } from "../utils/monthlyStockTracking.js";
+import { resolveLine, moveStock, applyLines, StockError } from "../utils/stockService.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VENDOR-CODE EXTRACTION  &  BASE-NAME SKU MATCHING
@@ -802,232 +803,30 @@ const addItemStockByName = async (itemGroupId, itemName, quantity, warehouseName
   return { success: true, type: 'group', stock: savedStock, groupName: group.name, itemName: groupItem.name, warehouse: targetWarehouse };
 };
 
-// Helper function to reduce stock (for reversing bills)
+// Reduce stock (reversing a bill). Uses the central stock service: strict item matching,
+// atomic write, and it refuses (instead of clamping to 0) when the pieces were already sold.
 const reduceItemStock = async (itemIdValue, quantity, warehouseName, itemName = null, itemGroupId = null, itemSku = null) => {
   const targetWarehouse = warehouseName?.trim() || "Warehouse";
-  console.log(`📦 reduceItemStock: targetWarehouse="${targetWarehouse}", qty=${quantity}, itemName="${itemName}"`);
-  
-  const updateWarehouseStock = (warehouseStocks, qty, targetWarehouse) => {
-    if (!warehouseStocks || warehouseStocks.length === 0) {
-      return { success: false, message: `No stock found in warehouse "${targetWarehouse}"` };
-    }
-    
-    // Use flexible matching to find warehouse stock
-    let warehouseStock = warehouseStocks.find(ws => 
-      matchesWarehouse(ws.warehouse, targetWarehouse)
-    );
-    
-    if (!warehouseStock) {
-      console.log(`   ❌ Warehouse "${targetWarehouse}" not found for this item`);
-      return { success: false, message: `Warehouse "${targetWarehouse}" not found for this item` };
-    }
-    
-    console.log(`   ✅ Found existing warehouse stock for "${warehouseStock.warehouse}" (matched with "${targetWarehouse}")`);
-    
-    const currentStockOnHand = parseFloat(warehouseStock.stockOnHand) || 0;
-    const currentAvailableForSale = parseFloat(warehouseStock.availableForSale) || 0;
-    const currentPhysicalStockOnHand = parseFloat(warehouseStock.physicalStockOnHand) || 0;
-    const currentPhysicalAvailableForSale = parseFloat(warehouseStock.physicalAvailableForSale) || 0;
-    
-    if (currentStockOnHand < qty) {
-      console.log(`   ⚠️ Insufficient stock: ${currentStockOnHand} < ${qty}`);
-      return { 
-        success: false, 
-        message: `Insufficient stock in warehouse "${targetWarehouse}". Available: ${currentStockOnHand}, Required: ${qty}` 
-      };
-    }
-    
-    warehouseStock.warehouse = targetWarehouse; // Normalize to target warehouse name
-    warehouseStock.stockOnHand = Math.max(0, currentStockOnHand - qty);
-    warehouseStock.availableForSale = Math.max(0, currentAvailableForSale - qty);
-    warehouseStock.physicalStockOnHand = Math.max(0, currentPhysicalStockOnHand - qty);
-    warehouseStock.physicalAvailableForSale = Math.max(0, currentPhysicalAvailableForSale - qty);
-    
-    console.log(`   ✅ Subtracted ${qty} from stock: ${currentStockOnHand} -> ${warehouseStock.stockOnHand}`);
-    
-    return { success: true, warehouseStocks };
-  };
-  
-  // If itemId is null, use name-based search
-  if ((!itemIdValue || itemIdValue === null || itemIdValue === "null") && itemGroupId && itemName) {
-    return await reduceItemStockByName(itemGroupId, itemName, quantity, targetWarehouse, itemSku);
-  }
-  
-  let shoeItem = null;
-  if (itemIdValue && itemIdValue !== null && itemIdValue !== "null") {
-    shoeItem = await ShoeItem.findById(itemIdValue);
-  }
-  
-  if (shoeItem) {
-    const result = updateWarehouseStock(shoeItem.warehouseStocks, quantity, targetWarehouse);
-    if (!result.success) return result;
-    shoeItem.warehouseStocks = result.warehouseStocks;
-    await shoeItem.save();
-    console.log(`✅ Reduced stock for standalone item: ${itemName || itemIdValue}, Quantity: ${quantity}, Warehouse: ${targetWarehouse}`);
-    return { success: true, type: 'standalone', warehouse: targetWarehouse };
-  }
-  
-  if (itemGroupId && itemName) {
-    const nameBasedResult = await reduceItemStockByName(itemGroupId, itemName, quantity, targetWarehouse, itemSku);
-    if (nameBasedResult.success) return nameBasedResult;
-  }
-  
-  let itemGroups = [];
-  if (itemGroupId) {
-    const specificGroup = await ItemGroup.findById(itemGroupId);
-    if (specificGroup && specificGroup.isActive !== false) {
-      itemGroups = [specificGroup];
-    }
-  }
-  
-  if (itemGroups.length === 0) {
-    itemGroups = await ItemGroup.find({ isActive: { $ne: false } });
-  }
-  
-  for (const group of itemGroups) {
-    if (!group.items || !Array.isArray(group.items)) continue;
-    
-    for (let i = 0; i < group.items.length; i++) {
-      const groupItem = group.items[i];
-      const groupItemId = groupItem._id?.toString() || groupItem.id?.toString();
-      const compositeId = `${group._id}_${i}`;
-      
-      const itemIdStr = itemIdValue?.toString() || "";
-      const idMatches = 
-        itemIdStr === groupItemId ||
-        itemIdStr === compositeId ||
-        itemIdStr.includes(groupItemId) ||
-        groupItemId?.includes(itemIdStr);
-      
-      const nameMatches = itemName && groupItem.name && 
-        groupItem.name.toLowerCase().trim() === itemName.toLowerCase().trim();
-      
-      const skuMatches = itemSku && groupItem.sku && 
-        groupItem.sku.toLowerCase().trim() === itemSku.toLowerCase().trim();
-      
-      const shouldMatch = itemSku ? (skuMatches || idMatches) : (idMatches || nameMatches);
-      
-      if (shouldMatch) {
-        const result = updateWarehouseStock(groupItem.warehouseStocks || [], quantity, targetWarehouse);
-        if (!result.success) return result;
-        groupItem.warehouseStocks = result.warehouseStocks;
-        group.items[i] = groupItem;
-        group.markModified('items');
-        await group.save();
-        
-        // Update monthly opening stock for purchase
-        try {
-          const itemId = groupItem._id?.toString() || groupItem.id?.toString();
-          if (itemId) {
-            await updateMonthlyStockForPurchase(group._id.toString(), itemId, targetWarehouse, quantity, groupItem.name);
-          }
-        } catch (monthlyError) {
-          console.error(`   ⚠️ Error updating monthly stock (non-critical):`, monthlyError);
-        }
-        
-        return { success: true, type: 'group', groupName: group.name, itemName: groupItem.name, warehouse: targetWarehouse };
-      }
-    }
-  }
-  
-  return { success: false, message: `Item with ID ${itemIdValue} not found` };
-};
-
-// Helper function to reduce stock by name (for reversing)
-const reduceItemStockByName = async (itemGroupId, itemName, quantity, warehouseName, itemSku = null) => {
-  if (!itemGroupId || !itemName) {
-    return { success: false, message: "itemGroupId and itemName are required" };
-  }
-  
-  const targetWarehouse = warehouseName?.trim() || "Warehouse";
-  const group = await ItemGroup.findById(itemGroupId);
-  if (!group || group.isActive === false) {
-    return { success: false, message: `Item group ${itemGroupId} not found or inactive` };
-  }
-  
-  if (!group.items || !Array.isArray(group.items)) {
-    return { success: false, message: `Item group ${itemGroupId} has no items` };
-  }
-  
-  let itemIndex = -1;
-  if (itemSku) {
-    itemIndex = group.items.findIndex(gi => gi.sku && gi.sku.trim().toLowerCase() === itemSku.trim().toLowerCase());
-  } else {
-    itemIndex = group.items.findIndex(gi => gi.name && gi.name.trim().toLowerCase() === itemName.trim().toLowerCase() && !gi.sku);
-    if (itemIndex === -1) {
-      itemIndex = group.items.findIndex(gi => gi.name && gi.name.trim().toLowerCase() === itemName.trim().toLowerCase());
-    }
-  }
-  
-  if (itemIndex === -1) {
-    return { success: false, message: `Item with name "${itemName}"${itemSku ? ` and SKU "${itemSku}"` : ''} not found in group` };
-  }
-  
-  const groupItem = group.items[itemIndex];
-  
-  const updateWarehouseStock = (warehouseStocks, qty, targetWarehouse) => {
-    if (!warehouseStocks || warehouseStocks.length === 0) {
-      return { success: false, message: `No stock found in warehouse "${targetWarehouse}"` };
-    }
-    
-    // Use flexible matching to find warehouse stock
-    let warehouseStock = warehouseStocks.find(ws => 
-      matchesWarehouse(ws.warehouse, targetWarehouse)
-    );
-    
-    if (!warehouseStock) {
-      console.log(`   ❌ Warehouse "${targetWarehouse}" not found for this item`);
-      return { success: false, message: `Warehouse "${targetWarehouse}" not found for this item` };
-    }
-    
-    console.log(`   ✅ Found existing warehouse stock for "${warehouseStock.warehouse}" (matched with "${targetWarehouse}")`);
-    
-    const currentStockOnHand = parseFloat(warehouseStock.stockOnHand) || 0;
-    const currentAvailableForSale = parseFloat(warehouseStock.availableForSale) || 0;
-    const currentPhysicalStockOnHand = parseFloat(warehouseStock.physicalStockOnHand) || 0;
-    const currentPhysicalAvailableForSale = parseFloat(warehouseStock.physicalAvailableForSale) || 0;
-    
-    if (currentStockOnHand < qty) {
-      console.log(`   ⚠️ Insufficient stock: ${currentStockOnHand} < ${qty}`);
-      return { 
-        success: false, 
-        message: `Insufficient stock in warehouse "${targetWarehouse}". Available: ${currentStockOnHand}, Required: ${qty}` 
-      };
-    }
-    
-    warehouseStock.warehouse = targetWarehouse; // Normalize to target warehouse name
-    warehouseStock.stockOnHand = Math.max(0, currentStockOnHand - qty);
-    warehouseStock.availableForSale = Math.max(0, currentAvailableForSale - qty);
-    warehouseStock.physicalStockOnHand = Math.max(0, currentPhysicalStockOnHand - qty);
-    warehouseStock.physicalAvailableForSale = Math.max(0, currentPhysicalAvailableForSale - qty);
-    
-    console.log(`   ✅ Subtracted ${qty} from stock: ${currentStockOnHand} -> ${warehouseStock.stockOnHand}`);
-    
-    return { success: true, warehouseStocks };
-  };
-  
-  const result = updateWarehouseStock(groupItem.warehouseStocks || [], quantity, targetWarehouse);
-  if (!result.success) return result;
-  
-  groupItem.warehouseStocks = result.warehouseStocks;
-  group.items[itemIndex] = groupItem;
-  group.markModified('items');
-  await group.save();
-  
-  // Update monthly opening stock for purchase
+  const qty = Math.abs(parseFloat(quantity) || 0);
+  if (!qty) return { success: true, warehouse: targetWarehouse };
   try {
-    const itemId = groupItem._id?.toString() || groupItem.id?.toString();
-    if (itemId) {
-      await updateMonthlyStockForPurchase(group._id.toString(), itemId, targetWarehouse, quantity, groupItem.name);
-    }
-  } catch (monthlyError) {
-    console.error(`   ⚠️ Error updating monthly stock (non-critical):`, monthlyError);
+    const target = await resolveLine({
+      itemId: itemIdValue && itemIdValue !== "null" ? itemIdValue : null,
+      itemGroupId,
+      itemSku,
+      itemName: itemName ? extractVendorInfo(itemName).baseName : itemName,
+    });
+    if (!target) return { success: false, message: `Item "${itemName || itemIdValue}" not found` };
+    await moveStock(target, targetWarehouse, -qty);
+    return { success: true, type: target.kind, warehouse: targetWarehouse };
+  } catch (err) {
+    return { success: false, message: err.message };
   }
-  
-  return { success: true, type: 'group', stock: groupItem.warehouseStocks, groupName: group.name, itemName: groupItem.name, warehouse: targetWarehouse };
 };
 
-// Helper function to update vendor balance (increase payables)
+const reduceItemStockByName = (itemGroupId, itemName, quantity, warehouseName, itemSku = null) =>
+  reduceItemStock(null, quantity, warehouseName, itemName, itemGroupId, itemSku);
+
 const updateVendorBalance = async (vendorId, billAmount, operation = 'add') => {
   try {
     if (!vendorId) return { success: false, message: "Vendor ID is required" };
@@ -1254,7 +1053,9 @@ export const createBill = async (req, res) => {
     if (existingBill) {
       return res.status(409).json({ message: "Bill number already exists for this user" });
     }
-    
+
+    billData.stockApplied = false; // set to true below once stock is really added
+
     const bill = await Bill.create(billData);
 
     // Reply as soon as the bill is stored. The price sync / stock / vendor updates
@@ -1325,7 +1126,9 @@ export const createBill = async (req, res) => {
       })));
     }
     
-    if ((billData.status === "open" || billData.status === "completed" || billData.status === "draft") && hasItemsWithQuantity) {
+    // A DRAFT bill does not move stock or payables — only open/completed bills do.
+    // (Drafts used to add stock here, and draft → open added it a second time.)
+    if ((billData.status === "open" || billData.status === "completed") && hasItemsWithQuantity) {
       const sourceType = billData.sourceType || "direct";
       console.log(`   ✅ Status is "${billData.status}" and items with quantity > 0 found, proceeding...`);
       console.log(`   Source type: "${sourceType}"`);
@@ -1441,6 +1244,8 @@ export const createBill = async (req, res) => {
 
         // Per-vendor breakdown (e.g. HMC: 12, UMC: 10) for items shared across vendors
         await recordVendorQuantities(billData.items, billData.vendorName, 1);
+        // Remember where the stock really went, so edit/delete reverse it in the same place
+        await Bill.updateOne({ _id: bill._id }, { $set: { warehouse: warehouseName, stockApplied: true } });
         } else {
           console.log(`   No items found in bill - skipping stock addition`);
         }
@@ -1665,7 +1470,17 @@ export const updateBill = async (req, res) => {
         console.log(`⚠️ No warehouse or locCode provided, using default "Warehouse"`);
       }
     }
-    
+
+    // A bill that recorded where its stock went is always adjusted/reversed in THAT warehouse.
+    if (existingBill.stockApplied === true && existingBill.warehouse) {
+      warehouseName = existingBill.warehouse;
+      billData.warehouse = warehouseName;
+    }
+    // Older bills (before the stockApplied flag): a DRAFT direct bill already added its stock
+    // and payables when it was created — don't add them a second time when it is opened.
+    const legacyDraftProcessed = existingBill.stockApplied === undefined && oldStatus === "draft" && sourceType === "direct";
+    delete billData.stockApplied; // bookkeeping field, set only below
+
     console.log(`\n🔄 BILL UPDATE STARTED`);
     console.log(`   Bill ID: ${id}`);
     console.log(`   Old Status: "${oldStatus}"`);
@@ -1681,6 +1496,7 @@ export const updateBill = async (req, res) => {
     
     // If changing from "open" or "completed" to "draft", reverse stock and vendor balance
     if ((oldStatus === "open" || oldStatus === "completed") && newStatus === "draft") {
+      if (sourceType === "direct") billData.stockApplied = false;
       // Only reverse stock for Direct Bills
       if (sourceType === "direct" && existingBill.items && Array.isArray(existingBill.items)) {
         console.log(`📦 Reversing stock for Direct Bill (changing from open to draft)`);
@@ -1757,7 +1573,14 @@ export const updateBill = async (req, res) => {
     }
     
     // If changing from "draft" to "open" or "completed", process the bill (add stock and update vendor balance)
-    if (oldStatus === "draft" && (newStatus === "open" || newStatus === "completed")) {
+    if (legacyDraftProcessed && (newStatus === "open" || newStatus === "completed")) {
+      billData.stockApplied = true; // stock + payables were already added when this draft was created
+    }
+    if (oldStatus === "draft" && (newStatus === "open" || newStatus === "completed") && !legacyDraftProcessed) {
+      if (sourceType === "direct") {
+        billData.stockApplied = true;
+        billData.warehouse = warehouseName;
+      }
       console.log(`\n📋 BILL STATUS CHANGE DETECTED: draft -> ${newStatus}`);
       console.log(`   Bill ID: ${id}`);
       console.log(`   Source Type: ${sourceType}`);
@@ -2068,42 +1891,46 @@ export const deleteBill = async (req, res) => {
       return res.status(404).json({ message: "Bill not found" });
     }
     
-    // If bill was "open" or "completed", reverse stock and vendor balance
-    if (bill.status === "open" || bill.status === "completed") {
-      const finalTotal = parseFloat(bill.finalTotal) || 0;
-      const warehouseName = bill.warehouse?.trim() || "Warehouse";
-      const sourceType = bill.sourceType || "direct";
-      
-      // Only reverse stock for Direct Bills
-      // PO → Bill and PO → Receive → Bill should NOT affect stock
-      if (sourceType === "direct" && bill.items && Array.isArray(bill.items)) {
-        console.log(`📦 Reversing stock for Direct Bill (deleting open bill)`);
-        for (const item of bill.items) {
-          if (item.quantity && parseFloat(item.quantity) > 0) {
-            try {
-              await reduceItemStock(
-                item.itemId,
-                parseFloat(item.quantity),
-                warehouseName,
-                item.itemName,
-                item.itemGroupId,
-                item.itemSku
-              );
-            } catch (error) {
-              console.error(`Error reversing stock for item ${item.itemName}:`, error);
-            }
-          }
+    const sourceType = bill.sourceType || "direct";
+    const isLegacy = bill.stockApplied === undefined;
+    // Payables were added for open/completed bills (and, for older bills, also for drafts)
+    const payablesCounted = bill.status === "open" || bill.status === "completed" ||
+      (isLegacy && bill.status === "draft" && sourceType === "direct");
+    // Stock was added only for direct bills
+    const stockCounted = sourceType === "direct" && (bill.stockApplied === true || (isLegacy && payablesCounted));
+
+    if (stockCounted && Array.isArray(bill.items) && bill.items.length > 0) {
+      // Older admin bills put stock in "Warehouse" even when another warehouse was saved on the bill
+      const isAdminEmail = String(bill.userId || "").toLowerCase() === "officerootments@gmail.com";
+      const warehouseName = bill.stockApplied === true
+        ? (bill.warehouse?.trim() || "Warehouse")
+        : (isAdminEmail ? "Warehouse" : (bill.warehouse?.trim() || "Warehouse"));
+      const lines = bill.items.map((it) => ({
+        itemId: it.itemId,
+        itemGroupId: it.itemGroupId,
+        itemSku: it.itemSku || it.sku,
+        itemName: it.itemName ? extractVendorInfo(it.itemName).baseName : it.itemName,
+        quantity: it.quantity,
+      }));
+      try {
+        // All-or-nothing: if some pieces were already sold/moved, nothing changes and the bill stays
+        await applyLines(lines, warehouseName, -1);
+      } catch (err) {
+        if (err instanceof StockError) {
+          return res.status(409).json({
+            message: `Cannot delete this bill: ${err.message}. Some of its pieces have already been sold or moved. Record an inventory adjustment instead.`,
+            code: "STOCK_ERROR",
+            details: err.details,
+          });
         }
-        // Undo the per-vendor breakdown recorded when this bill was created
-        await recordVendorQuantities(bill.items, bill.vendorName, -1);
-      } else {
-        console.log(`📦 Skipping stock reversal (bill is from ${sourceType}, stock not managed here)`);
+        throw err;
       }
-      
-      // Reverse vendor balance (reduce payables) - always do this
-      if (bill.vendorId) {
-        await updateVendorBalance(bill.vendorId, finalTotal, 'subtract');
-      }
+      // Undo the per-vendor breakdown recorded when this bill was created
+      await recordVendorQuantities(bill.items, bill.vendorName, -1);
+    }
+
+    if (payablesCounted && bill.vendorId) {
+      await updateVendorBalance(bill.vendorId, parseFloat(bill.finalTotal) || 0, 'subtract');
     }
     
     const deletedBill = await Bill.findByIdAndDelete(id);
@@ -2548,6 +2375,8 @@ export const convertPurchaseReceiveToBill = async (req, res) => {
 };
 
 // Resync stock for all items in a bill (useful to repair stock when multi-row items were under-counted)
+// Re-apply the stock of a bill whose stock was NOT added (e.g. a failure during save).
+// It never "tops up" to the bill quantity any more — that re-created pieces that had already been sold.
 export const resyncBillStock = async (req, res) => {
   try {
     const { id } = req.params;
@@ -2555,93 +2384,37 @@ export const resyncBillStock = async (req, res) => {
     if (!bill) {
       return res.status(404).json({ success: false, message: "Bill not found" });
     }
-
+    if ((bill.sourceType || "direct") !== "direct") {
+      return res.status(400).json({ success: false, message: "Only direct bills manage stock. Stock for this bill comes from its Purchase Receive." });
+    }
+    if (bill.status !== "open" && bill.status !== "completed") {
+      return res.status(400).json({ success: false, message: "Only open/completed bills add stock." });
+    }
+    if (bill.stockApplied !== false) {
+      return res.status(409).json({
+        success: false,
+        message: bill.stockApplied === true
+          ? "This bill is already counted in stock."
+          : "This is an older bill — it cannot be known whether its stock was added. Use an inventory adjustment to correct stock.",
+      });
+    }
     const warehouseName = bill.warehouse?.trim() || "Warehouse";
-    const aggregatedMap = new Map();
-
-    for (const item of (bill.items || [])) {
-      const qty = parseFloat(item.quantity) || 0;
-      if (qty <= 0) continue;
-      const key = item.itemId?.toString() || `${item.itemGroupId || ''}_${item.itemName || ''}_${item.itemSku || ''}`;
-      if (aggregatedMap.has(key)) {
-        aggregatedMap.get(key).quantity += qty;
-      } else {
-        aggregatedMap.set(key, {
-          itemId: item.itemId,
-          quantity: qty,
-          itemName: item.itemName,
-          itemGroupId: item.itemGroupId,
-          itemSku: item.itemSku,
-        });
-      }
-    }
-
-    const results = [];
-    for (const item of aggregatedMap.values()) {
-      let targetItem = null;
-      if (item.itemId && mongoose.Types.ObjectId.isValid(item.itemId)) {
-        targetItem = await ShoeItem.findById(item.itemId);
-      }
-      if (!targetItem && item.itemName) {
-        const { baseName } = extractVendorInfo(item.itemName);
-        targetItem = await ShoeItem.findOne({
-          $or: [
-            { itemName: { $regex: `^${item.itemName}$`, $options: "i" } },
-            { itemName: { $regex: `^${baseName}$`, $options: "i" } },
-          ]
-        });
-      }
-
-      if (targetItem) {
-        const itemPlain = targetItem.toObject();
-        if (!itemPlain.warehouseStocks || !Array.isArray(itemPlain.warehouseStocks)) {
-          itemPlain.warehouseStocks = [];
-        }
-
-        let wsEntry = itemPlain.warehouseStocks.find(ws => matchesWarehouse(ws.warehouse, warehouseName));
-        if (!wsEntry) {
-          wsEntry = {
-            warehouse: warehouseName,
-            openingStock: 0,
-            openingStockValue: 0,
-            stockOnHand: 0,
-            committedStock: 0,
-            availableForSale: 0,
-            physicalOpeningStock: 0,
-            physicalStockOnHand: 0,
-            physicalCommittedStock: 0,
-            physicalAvailableForSale: 0,
-          };
-          itemPlain.warehouseStocks.push(wsEntry);
-        }
-
-        const currentStock = parseFloat(wsEntry.stockOnHand) || 0;
-        if (currentStock < item.quantity) {
-          const needed = item.quantity - currentStock;
-          wsEntry.stockOnHand = currentStock + needed;
-          wsEntry.availableForSale = (parseFloat(wsEntry.availableForSale) || 0) + needed;
-          wsEntry.physicalStockOnHand = (parseFloat(wsEntry.physicalStockOnHand) || 0) + needed;
-          wsEntry.physicalAvailableForSale = (parseFloat(wsEntry.physicalAvailableForSale) || 0) + needed;
-
-          await ShoeItem.findByIdAndUpdate(targetItem._id, {
-            $set: { warehouseStocks: itemPlain.warehouseStocks }
-          });
-
-          results.push({ item: targetItem.itemName, added: needed, totalStock: item.quantity });
-        } else {
-          results.push({ item: targetItem.itemName, added: 0, totalStock: currentStock });
-        }
-      }
-    }
-
+    const lines = (bill.items || []).map((it) => ({
+      itemId: it.itemId,
+      itemGroupId: it.itemGroupId,
+      itemSku: it.itemSku || it.sku,
+      itemName: it.itemName ? extractVendorInfo(it.itemName).baseName : it.itemName,
+      quantity: it.quantity,
+    }));
+    const applied = await applyLines(lines, warehouseName, 1);
+    await Bill.updateOne({ _id: bill._id }, { $set: { stockApplied: true, warehouse: warehouseName } });
     return res.status(200).json({
       success: true,
-      message: `Stock resynced successfully for ${results.length} items.`,
-      results
+      message: `Stock added for ${applied.length} items in ${warehouseName}.`,
+      results: applied.map((m) => ({ item: m.target.name, added: m.delta })),
     });
   } catch (err) {
     console.error("Resync bill stock error:", err);
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err instanceof StockError ? 409 : 500).json({ success: false, message: err.message });
   }
 };
-

@@ -2,6 +2,37 @@ import InventoryAdjustment from "../model/InventoryAdjustment.js";
 import ShoeItem from "../model/ShoeItem.js";
 import ItemGroup from "../model/ItemGroup.js";
 import { nextInventoryAdjustment } from "../utils/nextInventoryAdjustment.js";
+import { resolveLine, moveStock, undoMovements, StockError } from "../utils/stockService.js";
+
+// What an adjustment means for stock: only "quantity" adjustments in status "adjusted" move stock.
+const adjustmentEffect = (adj) =>
+  adj && adj.status === "adjusted" && (adj.adjustmentType || "quantity") === "quantity"
+    ? { items: adj.items || [], warehouse: adj.warehouse }
+    : null;
+
+// Apply (sign = 1) or undo (sign = -1) an adjustment. All-or-nothing; a reduction larger than
+// the stock is refused instead of being clamped to 0.
+const applyAdjustmentEffect = async (effect, sign) => {
+  if (!effect) return [];
+  const done = [];
+  try {
+    for (const item of effect.items) {
+      const qty = parseFloat(item.quantityAdjusted) || 0;
+      if (!qty) continue;
+      const target = await resolveLine({ itemId: item.itemId, itemGroupId: item.itemGroupId, itemSku: item.itemSku, itemName: item.itemName });
+      if (!target) throw new StockError(`Item "${item.itemName}" not found`);
+      await moveStock(target, effect.warehouse, sign * qty);
+      done.push({ target, warehouse: effect.warehouse, delta: sign * qty });
+    }
+  } catch (err) {
+    await undoMovements(done);
+    throw err;
+  }
+  return done;
+};
+
+const adjustmentConflict = (res, err) =>
+  res.status(409).json({ message: err.message, code: "STOCK_ERROR", details: err.details || {} });
 
 // Helper function to format inventory adjustment for frontend compatibility
 const formatAdjustment = (doc) => {
@@ -462,7 +493,8 @@ export const createInventoryAdjustment = async (req, res) => {
           totalQuantityAdjusted += Math.abs(quantityAdjusted);
         } else {
           const unitCost = parseFloat(item.unitCost) || 0;
-          const newQty = parseFloat(item.newQuantity) || currentQuantity;
+          const parsedNewQty = parseFloat(item.newQuantity);
+          const newQty = Number.isFinite(parsedNewQty) ? parsedNewQty : currentQuantity; // 0 is a valid new quantity
           newQuantity = newQty;
           newValue = newQty * unitCost;
           valueAdjusted = newValue - currentValue;
@@ -514,26 +546,14 @@ export const createInventoryAdjustment = async (req, res) => {
       locCode: adjustmentData.locCode || "",
     });
     
-    // If status is "adjusted", apply adjustments to stock
-    if (adjustment.status === "adjusted") {
-      for (const item of processedItems) {
-        if (adjustmentData.adjustmentType === "quantity" && item.quantityAdjusted !== 0) {
-          try {
-            await adjustItemStock(
-              item.itemId,
-              item.quantityAdjusted,
-              adjustmentData.warehouse,
-              item.itemName,
-              item.itemGroupId,
-              item.itemSku
-            );
-          } catch (stockError) {
-            console.error(`Error adjusting stock for ${item.itemName}:`, stockError);
-          }
-        }
-      }
+    // If status is "adjusted", apply adjustments to stock (all-or-nothing)
+    try {
+      await applyAdjustmentEffect(adjustmentEffect(adjustment), 1);
+    } catch (err) {
+      await InventoryAdjustment.findByIdAndDelete(adjustment._id);
+      if (err instanceof StockError) return adjustmentConflict(res, err);
+      throw err;
     }
-    
     res.status(201).json(formatAdjustment(adjustment));
   } catch (error) {
     console.error("Error creating inventory adjustment:", error);
@@ -620,87 +640,24 @@ export const updateInventoryAdjustment = async (req, res) => {
     const warehouse = adjustmentData.warehouse || existingAdjustment.warehouse;
     const adjustmentType = adjustmentData.adjustmentType || existingAdjustment.adjustmentType;
     
-    // If changing from draft to adjusted, apply stock changes
-    if (oldStatus === "draft" && newStatus === "adjusted") {
-      for (const item of newItems) {
-        if (adjustmentType === "quantity" && item.quantityAdjusted !== 0) {
-          const qtyToApply = parseFloat(item.quantityAdjusted) || 0;
-          try {
-            await adjustItemStock(
-              item.itemId,
-              qtyToApply,
-              warehouse,
-              item.itemName,
-              item.itemGroupId,
-              item.itemSku
-            );
-          } catch (error) {
-            console.error(`Error applying adjustment for ${item.itemName}:`, error);
-          }
-        }
+    // Undo what the old version did to stock, apply the new version (all-or-nothing).
+    const oldEffect = adjustmentEffect(existingAdjustment.toObject());
+    const newEffect = adjustmentEffect({ ...existingAdjustment.toObject(), status: newStatus, adjustmentType, warehouse, items: newItems });
+    let undone = [];
+    let applied = [];
+    try {
+      undone = await applyAdjustmentEffect(oldEffect, -1);
+      try {
+        applied = await applyAdjustmentEffect(newEffect, 1);
+      } catch (err) {
+        await undoMovements(undone);
+        throw err;
       }
+    } catch (err) {
+      if (err instanceof StockError) return adjustmentConflict(res, err);
+      throw err;
     }
-    
-    // If changing from adjusted to draft, reverse stock changes
-    if (oldStatus === "adjusted" && newStatus === "draft") {
-      for (const item of oldItems) {
-        if (adjustmentType === "quantity" && item.quantityAdjusted !== 0) {
-          const qtyToReverse = parseFloat(item.quantityAdjusted) || 0;
-          try {
-            await adjustItemStock(
-              item.itemId,
-              -qtyToReverse,
-              existingAdjustment.warehouse,
-              item.itemName,
-              item.itemGroupId,
-              item.itemSku
-            );
-          } catch (error) {
-            console.error(`Error reversing adjustment for ${item.itemName}:`, error);
-          }
-        }
-      }
-    }
-    
-    // If status remains adjusted, reverse old and apply new
-    if (oldStatus === "adjusted" && newStatus === "adjusted") {
-      for (const item of oldItems) {
-        if (adjustmentType === "quantity" && item.quantityAdjusted !== 0) {
-          const qtyToReverse = parseFloat(item.quantityAdjusted) || 0;
-          try {
-            await adjustItemStock(
-              item.itemId,
-              -qtyToReverse,
-              existingAdjustment.warehouse,
-              item.itemName,
-              item.itemGroupId,
-              item.itemSku
-            );
-          } catch (error) {
-            console.error(`Error reversing old adjustment for ${item.itemName}:`, error);
-          }
-        }
-      }
-      
-      for (const item of newItems) {
-        if (adjustmentType === "quantity" && item.quantityAdjusted !== 0) {
-          const qtyToApply = parseFloat(item.quantityAdjusted) || 0;
-          try {
-            await adjustItemStock(
-              item.itemId,
-              qtyToApply,
-              warehouse,
-              item.itemName,
-              item.itemGroupId,
-              item.itemSku
-            );
-          } catch (error) {
-            console.error(`Error applying new adjustment for ${item.itemName}:`, error);
-          }
-        }
-      }
-    }
-    
+
     const updatedAdjustment = await InventoryAdjustment.findByIdAndUpdate(
       id,
       { $set: adjustmentData },
@@ -724,27 +681,14 @@ export const deleteInventoryAdjustment = async (req, res) => {
       return res.status(404).json({ message: "Inventory adjustment not found" });
     }
     
-    if (adjustment.status === "adjusted") {
-      const items = adjustment.items || [];
-      for (const item of items) {
-        if (adjustment.adjustmentType === "quantity" && item.quantityAdjusted !== 0) {
-          const qtyToReverse = parseFloat(item.quantityAdjusted) || 0;
-          try {
-            await adjustItemStock(
-              item.itemId,
-              -qtyToReverse,
-              adjustment.warehouse,
-              item.itemName,
-              item.itemGroupId,
-              item.itemSku
-            );
-          } catch (error) {
-            console.error(`Error reversing stock for deleted adjustment item ${item.itemName}:`, error);
-          }
-        }
+    try {
+      await applyAdjustmentEffect(adjustmentEffect(adjustment.toObject()), -1);
+    } catch (err) {
+      if (err instanceof StockError) {
+        return res.status(409).json({ message: `Cannot delete this adjustment: ${err.message}`, code: "STOCK_ERROR", details: err.details || {} });
       }
+      throw err;
     }
-    
     await InventoryAdjustment.findByIdAndDelete(id);
     res.status(200).json({ message: "Inventory adjustment deleted successfully" });
   } catch (error) {

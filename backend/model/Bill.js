@@ -16,6 +16,9 @@ const billSchema = new mongoose.Schema(
     purchaseOrderId: { type: mongoose.Schema.Types.ObjectId, ref: "PurchaseOrder", default: null },
     purchaseReceiveId: { type: mongoose.Schema.Types.ObjectId, ref: "PurchaseReceive", default: null },
     sourceType: { type: String, default: "direct" }, // "direct", "from_po", "from_receive"
+    // true while this bill's quantities are counted in stock (direct bills only).
+    // Missing on older bills — see billStockApplied() in BillController.
+    stockApplied: { type: Boolean },
     dueDate: { type: Date },
     paymentTerms: { type: String, default: "Net 60" },
     subject: { type: String, default: "" },

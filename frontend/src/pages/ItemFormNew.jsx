@@ -125,21 +125,36 @@ const ItemFormNew = () => {
         const data = await res.json();
         if (!active) return;
         setOriginal(data);
+        const str = (v) => (v != null && v !== '' ? String(v) : '');
         setF((p) => ({
           ...p,
           itemCode: data.sku || '',
           autoGenerate: false,
           productName: data.itemName || '',
           printName: data.printName || data.itemName || '',
+          category: data.itemCategory || '',
+          subCategory: data.subCategory || '',
           brand: data.brand || '',
+          subBrand: data.subBrand || '',
           unit: (data.unit || 'pcs'),
           hsnCode: data.hsnCode || '',
+          purchaseTax: data.purchaseTax || '',
+          salesTax: data.salesTax || data.taxRateIntra || '',
+          purchaseInclusive: Boolean(data.purchaseInclusive),
+          salesInclusive: data.salesInclusive !== undefined ? Boolean(data.salesInclusive) : true,
+          cess: Boolean(data.cess),
+          manageBatch: Boolean(data.manageBatch) || data.trackingMethod === 'batch',
           shortDesc: data.salesDescription || data.shortDescription || '',
-          purchasePrice: data.costPrice != null ? String(data.costPrice) : '',
-          sellingPrice: data.sellingPrice != null ? String(data.sellingPrice) : '',
-          mrp: data.mrp != null ? String(data.mrp) : '',
-          minQty: data.reorderPoint != null ? String(data.reorderPoint) : '',
-          netWeight: data.weight != null ? String(data.weight) : '',
+          purchasePrice: str(data.purchasePrice ?? data.costPrice),
+          landingCost: str(data.landingCost),
+          mrp: str(data.mrp),
+          sellingDiscount: str(data.sellingDiscount),
+          sellingPrice: str(data.sellingPrice),
+          sellingMargin: str(data.sellingMargin),
+          minQty: str(data.reorderPoint),
+          openingQty: str(data.openingQty ?? data.openingStock),
+          membershipMargin: str(data.membershipMargin),
+          netWeight: str(data.netWeight ?? data.weight),
         }));
         if (descRef.current && (data.description || data.salesDescription)) {
           descRef.current.innerHTML = data.description || '';
@@ -165,24 +180,50 @@ const ItemFormNew = () => {
     if (Object.keys(errs).length) return;
 
     const description = descRef.current?.innerHTML || '';
+    const optNum = (v) => (v !== '' && v != null && Number.isFinite(Number(v)) ? Number(v) : undefined);
+
+    // Every form field the backend stores, shared by create and edit.
+    const formFields = {
+      printName: (f.printName || f.productName).trim(),
+      itemCategory: f.category,
+      subCategory: f.subCategory,
+      brand: f.brand,
+      subBrand: f.subBrand,
+      unit: f.unit,
+      hsnCode: f.hsnCode,
+      purchaseTax: f.purchaseTax,
+      salesTax: f.salesTax,
+      taxRateIntra: f.salesTax,
+      taxRateInter: f.salesTax,
+      purchaseInclusive: f.purchaseInclusive,
+      salesInclusive: f.salesInclusive,
+      cess: f.cess,
+      manageBatch: f.manageBatch,
+      trackingMethod: f.manageBatch ? 'batch' : 'none',
+      salesDescription: f.shortDesc,
+      description,
+      purchasePrice: optNum(f.purchasePrice),
+      costPrice: optNum(f.purchasePrice) ?? 0,
+      landingCost: optNum(f.landingCost),
+      mrp: optNum(f.mrp) ?? 0,
+      sellingDiscount: optNum(f.sellingDiscount),
+      sellingPrice: optNum(f.sellingPrice) ?? 0,
+      sellingMargin: optNum(f.sellingMargin),
+      membershipMargin: optNum(f.membershipMargin),
+      reorderPoint: f.minQty !== '' ? String(f.minQty) : '',
+      netWeight: optNum(f.netWeight),
+      weight: f.netWeight !== '' ? String(f.netWeight) : '',
+    };
 
     if (isEdit) {
       // Merge changes onto the original item so untouched fields are preserved.
       const payload = {
         ...(original || {}),
+        ...formFields,
         itemName: f.productName,
-        printName: f.printName,
         sku: f.itemCode,
-        unit: f.unit,
-        brand: f.brand,
-        hsnCode: f.hsnCode,
-        salesDescription: f.shortDesc,
-        description,
-        costPrice: f.purchasePrice ? Number(f.purchasePrice) : 0,
-        sellingPrice: f.sellingPrice ? Number(f.sellingPrice) : 0,
-        mrp: f.mrp ? Number(f.mrp) : (original?.mrp ?? 0),
-        reorderPoint: f.minQty !== '' ? Number(f.minQty) : (original?.reorderPoint ?? ''),
-        weight: f.netWeight !== '' ? Number(f.netWeight) : (original?.weight ?? ''),
+        // Opening qty is only recorded here; stock itself is managed from the Stocks tab.
+        openingQty: optNum(f.openingQty),
       };
       try {
         setSaving(true);
@@ -212,32 +253,18 @@ const ItemFormNew = () => {
     const openingQty = num(f.openingQty);
 
     const payload = {
+      ...formFields,
       type: 'goods',
       itemName: f.productName.trim(),
-      printName: (f.printName || f.productName).trim(),
       // Empty SKU lets the backend auto-generate a unique one.
       sku: f.autoGenerate ? '' : f.itemCode.trim(),
       itemCode: f.autoGenerate ? '' : f.itemCode.trim(),
-      unit: f.unit,
-      brand: f.brand,
-      hsnCode: f.hsnCode,
-      // Schema only allows shirt/shoe/other for `category`; keep the picked label separately.
+      // Schema only allows shirt/shoe/other for `category`; the picked label is in itemCategory.
       category: 'other',
-      itemCategory: f.category,
-      subCategory: f.subCategory,
-      taxRateIntra: f.salesTax,
-      taxRateInter: f.salesTax,
-      salesDescription: f.shortDesc,
-      description,
-      costPrice: num(f.purchasePrice),
-      sellingPrice: num(f.sellingPrice),
-      mrp: num(f.mrp),
-      reorderPoint: f.minQty !== '' ? String(f.minQty) : '',
-      weight: f.netWeight !== '' ? String(f.netWeight) : '',
       stock: openingQty,
       openingStock: openingQty,
+      openingQty,
       trackInventory: true,
-      trackingMethod: f.manageBatch ? 'batch' : 'none',
       createdBy,
       changedBy: createdBy,
       userLocName: currentUser.locName || '',

@@ -8,6 +8,7 @@ import Bill from "../model/Bill.js";
 import Store from "../model/Store.js";
 import User from "../model/UserModel.js";
 import { isAllowedStore, DISCARDED_NAME_PATTERNS } from "./StoreController.js";
+import { sameWarehouse } from "../utils/stockService.js";
 
 // Helper function to get inventory adjustments from MongoDB
 const getInventoryAdjustments = async (conditions) => {
@@ -904,39 +905,26 @@ export const getInventoryValuation = async (req, res) => {
     // Normalize warehouse name
     const normalizedWarehouse = warehouse ? normalizeWarehouseName(warehouse) : null;
     
-    // Fetch standalone items
-    let standaloneItems = [];
-    if (!isMainAdmin && locCode && locCode !== '858' && locCode !== '103') {
-      standaloneItems = await ShoeItem.find({
-        "warehouseStocks.warehouse": normalizedWarehouse
-      });
-    } else if (isAdmin && warehouse && warehouse !== "All Stores") {
-      standaloneItems = await ShoeItem.find({
-        "warehouseStocks.warehouse": normalizedWarehouse
-      });
-    } else {
-      standaloneItems = await ShoeItem.find({});
-    }
+    // Which warehouse to value: a store user's own store, or the store an admin picked.
+    // (Admins picking a store used to get the item's value across ALL warehouses.)
+    const restrictWh = (!isMainAdmin && locCode && locCode !== '858' && locCode !== '103') || (isAdmin && warehouse && warehouse !== "All Stores")
+      ? (normalizedWarehouse || warehouse)
+      : null;
+    const inScope = (ws) => !restrictWh || sameWarehouse(ws?.warehouse, restrictWh);
+
+    // Fetch standalone items (no images — they are not needed for valuation)
+    let standaloneItems = await ShoeItem.find({}).select("-images -image").lean();
+    if (restrictWh) standaloneItems = standaloneItems.filter((it) => (it.warehouseStocks || []).some(inScope));
     
     // Fetch items from item groups
-    const itemGroups = await ItemGroup.find({ isActive: { $ne: false } });
+    // Inactive groups are included: their pieces are still physically in stock and have value
+    const itemGroups = await ItemGroup.find({}).select("-images -image -items.images -items.image").lean();
     let groupItems = [];
     
     itemGroups.forEach(group => {
       if (group.items && Array.isArray(group.items)) {
         group.items.forEach((item, index) => {
-          let shouldInclude = true;
-          
-          if (!isMainAdmin && locCode && locCode !== '858' && locCode !== '103') {
-            const hasStock = item.warehouseStocks && Array.isArray(item.warehouseStocks) &&
-              item.warehouseStocks.some(ws => ws.warehouse === normalizedWarehouse);
-            shouldInclude = hasStock;
-          } else if (isAdmin && warehouse && warehouse !== "All Stores") {
-            const hasStock = item.warehouseStocks && Array.isArray(item.warehouseStocks) &&
-              item.warehouseStocks.some(ws => ws.warehouse === normalizedWarehouse);
-            shouldInclude = hasStock;
-          }
-          
+          const shouldInclude = !restrictWh || (item.warehouseStocks || []).some(inScope);
           if (shouldInclude) {
             const standaloneItem = {
               _id: item._id || `${group._id}_${index}`,
@@ -967,7 +955,7 @@ export const getInventoryValuation = async (req, res) => {
 
       if (item.warehouseStocks && Array.isArray(item.warehouseStocks)) {
         item.warehouseStocks.forEach(ws => {
-          if (!isMainAdmin && locCode && locCode !== '858' && locCode !== '103' && ws.warehouse !== normalizedWarehouse) return;
+          if (!inScope(ws)) return;
           const stock = parseFloat(ws.stockOnHand) || parseFloat(ws.stock) || 0;
           const cost = parseFloat(item.costPrice) || 0;
           itemValue += stock * cost;
@@ -988,7 +976,7 @@ export const getInventoryValuation = async (req, res) => {
 
       if (item.warehouseStocks && Array.isArray(item.warehouseStocks)) {
         item.warehouseStocks.forEach(ws => {
-          if (!isMainAdmin && locCode && locCode !== '858' && locCode !== '103' && ws.warehouse !== normalizedWarehouse) return;
+          if (!inScope(ws)) return;
           valuationByCategory[category].totalQuantity += parseFloat(ws.stockOnHand) || parseFloat(ws.stock) || 0;
         });
       }
@@ -1358,20 +1346,31 @@ export const getStockOnHandReport = async (req, res) => {
     dayBeforeStart.setDate(dayBeforeStart.getDate() - 1);
     dayBeforeStart.setHours(23, 59, 59, 999);
 
-    const [allPurchaseReceives, allTransferOrders, allSalesInvoices] = await Promise.all([
-      PurchaseReceive.find({ status: 'received', createdAt: { $lte: endDateObj } }).select('items toWarehouse createdAt').lean(),
-      TransferOrder.find({ status: 'completed', createdAt: { $lte: endDateObj } }).select('items sourceWarehouse destinationWarehouse createdAt').lean(),
-      SalesInvoice.find({ createdAt: { $gte: startDateObj, $lte: endDateObj } }).select('items lineItems warehouse createdAt').lean(),
+    // Every movement that changes stock, up to the end date (earlier ones are needed for opening stock).
+    const [allPurchaseReceives, allTransferOrders, allSalesInvoices, allBills, allAdjustments] = await Promise.all([
+      PurchaseReceive.find({ status: { $in: ['received', 'partially_received'] }, createdAt: { $lte: endDateObj } }).select('items toWarehouse createdAt').lean(),
+      // Valid statuses are draft / in_transit / transferred (this used to ask for "completed", which never exists)
+      TransferOrder.find({ status: { $in: ['draft', 'in_transit', 'transferred'] }, createdAt: { $lte: endDateObj } }).select('items status sourceWarehouse destinationWarehouse createdAt').lean(),
+      SalesInvoice.find({ createdAt: { $lte: endDateObj } }).select('items lineItems category warehouse branch stockWarehouse stockApplied createdAt').lean(),
+      Bill.find({ sourceType: { $in: [null, 'direct'] }, status: { $in: ['open', 'completed'] }, createdAt: { $lte: endDateObj } }).select('items warehouse createdAt').lean(),
+      InventoryAdjustment.find({ status: 'adjusted', adjustmentType: { $ne: 'value' }, createdAt: { $lte: endDateObj } }).select('items warehouse createdAt').lean(),
     ]);
 
-    // Index movements by itemId for O(1) lookup
+    // Index movements by itemId for O(1) lookup. prByItem = stock IN, salesByItem = stock OUT.
     const prByItem = new Map();
+    const pushMove = (map, id, entry) => {
+      if (!id) return;
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(entry);
+    };
     for (const pr of allPurchaseReceives) {
       for (const it of (pr.items || [])) {
-        const id = it.itemId?.toString();
-        if (!id) continue;
-        if (!prByItem.has(id)) prByItem.set(id, []);
-        prByItem.get(id).push({ qty: parseFloat(it.receivedQuantity || it.quantity || it.received) || 0, warehouse: pr.toWarehouse, date: new Date(pr.createdAt) });
+        pushMove(prByItem, it.itemId?.toString(), { qty: parseFloat(it.receivedQuantity || it.received || it.quantity) || 0, warehouse: pr.toWarehouse || "Warehouse", date: new Date(pr.createdAt) });
+      }
+    }
+    for (const b of allBills) {
+      for (const it of (b.items || [])) {
+        pushMove(prByItem, it.itemId?.toString(), { qty: parseFloat(it.quantity) || 0, warehouse: b.warehouse || "Warehouse", date: new Date(b.createdAt) });
       }
     }
     const toInByItem = new Map();
@@ -1379,23 +1378,30 @@ export const getStockOnHandReport = async (req, res) => {
     for (const to of allTransferOrders) {
       for (const it of (to.items || [])) {
         const id = it.itemId?.toString();
-        if (!id) continue;
         const qty = parseFloat(it.quantity) || 0;
         const date = new Date(to.createdAt);
-        if (!toInByItem.has(id)) toInByItem.set(id, []);
-        toInByItem.get(id).push({ qty, warehouse: to.destinationWarehouse, date });
-        if (!toOutByItem.has(id)) toOutByItem.set(id, []);
-        toOutByItem.get(id).push({ qty, warehouse: to.sourceWarehouse, date });
+        pushMove(toOutByItem, id, { qty, warehouse: to.sourceWarehouse, date });          // leaves source when created
+        if (to.status === 'transferred') pushMove(toInByItem, id, { qty, warehouse: to.destinationWarehouse, date });
       }
     }
     const salesByItem = new Map();
     for (const si of allSalesInvoices) {
-      const invoiceItems = getInvoiceItems(si);
-      for (const it of invoiceItems) {
-        const id = it.itemId?.toString();
-        if (!id) continue;
-        if (!salesByItem.has(id)) salesByItem.set(id, []);
-        salesByItem.get(id).push({ qty: parseFloat(it.quantity) || 0, warehouse: si.warehouse, date: new Date(si.createdAt) });
+      if (si.stockApplied === false) continue;
+      const isReturn = ['return', 'refund', 'cancel'].includes((si.category || '').toLowerCase().trim());
+      const wh = si.stockWarehouse || si.warehouse || si.branch;
+      for (const it of getInvoiceItems(si)) {
+        const qty = Math.abs(parseFloat(it.quantity) || 0);
+        // a return puts pieces back: record it as negative stock-out
+        pushMove(salesByItem, it.itemId?.toString(), { qty: isReturn ? -qty : qty, warehouse: wh, date: new Date(si.createdAt) });
+      }
+    }
+    for (const adj of allAdjustments) {
+      for (const it of (adj.items || [])) {
+        const q = parseFloat(it.quantityAdjusted) || 0;
+        if (!q) continue;
+        // positive adjustment = stock in, negative = stock out
+        if (q > 0) pushMove(prByItem, it.itemId?.toString(), { qty: q, warehouse: adj.warehouse, date: new Date(adj.createdAt) });
+        else pushMove(salesByItem, it.itemId?.toString(), { qty: -q, warehouse: adj.warehouse, date: new Date(adj.createdAt) });
       }
     }
     // ──────────────────────────────────────────────────────────────────────
@@ -1433,7 +1439,7 @@ export const getStockOnHandReport = async (req, res) => {
       for (const warehouseStock of warehouseStocksToProcess) {
         const warehouseName = normalizeWarehouseName(warehouseStock.warehouse);
         const wsVariations = getWarehouseNameVariations(warehouseName);
-        const wsMatch = (wh) => wh && (wsVariations.includes(wh) || wsVariations.includes(normalizeWarehouseName(wh)) || normalizeWarehouseName(wh) === warehouseName);
+        const wsMatch = (wh) => wh && (wsVariations.includes(wh) || wsVariations.includes(normalizeWarehouseName(wh)) || normalizeWarehouseName(wh) === warehouseName || sameWarehouse(wh, warehouseStock.warehouse));
 
         const originalOpeningStock = parseFloat(warehouseStock.openingStock) || 0;
         const itemCreationDate = new Date(item.createdAt || '2020-01-01');

@@ -502,7 +502,7 @@ export const getItemGroups = async (req, res) => {
     
     // Fetch ALL groups from database
     const query = {};
-    let groups = await ItemGroup.find(query).sort({ createdAt: -1 });
+    let groups = await ItemGroup.find(query).sort({ createdAt: -1 }).lean(); // plain objects: much faster than full documents
     
     console.log(`Fetched ${groups.length} total groups from database`);
     console.log(`Is viewing specific store: ${isViewingSpecificStore} (store warehouse: "${targetStoreWarehouse}")`);
@@ -535,7 +535,7 @@ export const getItemGroups = async (req, res) => {
     
     // Transform data to match frontend format
     const formattedGroups = paginatedGroups.map(group => {
-      const groupObj = group.toObject();
+      const groupObj = typeof group.toObject === "function" ? group.toObject() : { ...group };
       const itemsArray = Array.isArray(groupObj.items) ? groupObj.items : [];
       
       let relevantItems = itemsArray;
@@ -844,6 +844,23 @@ export const updateItemGroup = async (req, res) => {
           return oldItemId === newItemId;
         });
 
+        // STOCK PROTECTION: an existing variant ALWAYS keeps the stock that is in the database.
+        // Edit forms send back the warehouseStocks they loaded when the page was opened; saving
+        // those used to undo every sale/transfer made while the form was open.
+        // The only exception is the stock screen (stockEdit: true) for the one variant it edits.
+        if (existingItem) {
+          const isStockEditForThisItem =
+            req.body.stockEdit === true &&
+            req.body.itemId &&
+            String(req.body.itemId) === String(existingItem._id);
+          if (!isStockEditForThisItem) {
+            item.warehouseStocks = existingItem.warehouseStocks || [];
+          }
+          // Per-vendor quantities are stock too — keep the database values
+          if (existingItem.vendorPrices?.length) item.vendorPrices = existingItem.vendorPrices;
+          if (existingItem.vendorItemNames?.length) item.vendorItemNames = existingItem.vendorItemNames;
+          return item;
+        }
         // If warehouseStocks is not provided in the update, preserve from existing item
         if (!item.warehouseStocks || !Array.isArray(item.warehouseStocks) || item.warehouseStocks.length === 0) {
           if (existingItem && existingItem.warehouseStocks && Array.isArray(existingItem.warehouseStocks) && existingItem.warehouseStocks.length > 0) {

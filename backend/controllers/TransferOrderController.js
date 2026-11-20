@@ -3,6 +3,41 @@ import TransferOrder from "../model/TransferOrder.js"; // MongoDB model
 import ShoeItem from "../model/ShoeItem.js";
 import ItemGroup from "../model/ItemGroup.js";
 import { updateMonthlyStockForTransfer } from "../utils/monthlyStockTracking.js";
+import { applyLines, undoMovements, StockError } from "../utils/stockService.js";
+
+// ─── v2 stock effects ────────────────────────────────────────────────────────
+// What an order in a given status means for stock:
+//   draft / in_transit → pieces have left the source
+//   transferred        → pieces left the source AND arrived at the destination
+const transferEffects = (order) => {
+  const items = order.items || [];
+  if (order.status === "transferred") {
+    return [[items, order.sourceWarehouse, -1], [items, order.destinationWarehouse, 1]];
+  }
+  if (order.status === "draft" || order.status === "in_transit") {
+    return [[items, order.sourceWarehouse, -1]];
+  }
+  return [];
+};
+
+// Apply (or, with invert, undo) a list of effects. All-or-nothing.
+const applyTransferEffects = async (effects, invert = false) => {
+  const list = invert ? [...effects].reverse() : effects;
+  const done = [];
+  try {
+    for (const [items, warehouse, sign] of list) {
+      done.push(...(await applyLines(items, warehouse, invert ? -sign : sign)));
+    }
+  } catch (err) {
+    await undoMovements(done);
+    throw err;
+  }
+  return done;
+};
+
+const isV2 = (order) => order?.stockEngine === "v2";
+const stockConflict = (res, err) =>
+  res.status(409).json({ message: err.message, code: "STOCK_ERROR", details: err.details || {} });
 
 // Helper function for flexible warehouse matching
 // Warehouse name normalization mapping (same as frontend)
@@ -1805,28 +1840,29 @@ export const createTransferOrder = async (req, res) => {
       attachments: transferData.attachments || [],
     };
     
-    // Save to MongoDB
-    const mongoOrder = await TransferOrder.create(transferOrderData);
-    console.log(`✅ MongoDB transfer order created: ${transferOrderData.transferOrderNumber} (ID: ${mongoOrder._id})`);
-    
-    // Stock transfer logic:
-    // - draft / in_transit: Deduct from source immediately (stock is "in transit", not available)
-    // - transferred: Full transfer (subtract source + add destination) for direct completion
-    // - When receiving (in_transit -> transferred): Only add to destination (source already deducted)
-    
-    if (mongoOrder.status === "transferred") {
-      console.log(`📦 Transfer order created with status "transferred" - Transferring stock immediately`);
-      const items = mongoOrder.items || [];
-      await batchDeductSourceStock(items, transferData.sourceWarehouse);
-      await batchAddDestinationStock(items, transferData.destinationWarehouse);
-    } else {
-      // draft or in_transit: deduct from source only
-      console.log(`📦 Transfer order created with status "${mongoOrder.status}" - Deducting stock from source warehouse`);
-      const items = mongoOrder.items || [];
-      await batchDeductSourceStock(items, transferData.sourceWarehouse);
+    // ── STOCK (v2): validated, atomic, all-or-nothing ───────────────────
+    // The source must really hold the quantity — a transfer can no longer
+    // create pieces out of nothing (source clamped to 0 while destination got everything).
+    transferOrderData.stockEngine = "v2";
+    let movements = [];
+    try {
+      movements = await applyTransferEffects(transferEffects(transferOrderData));
+    } catch (err) {
+      if (err instanceof StockError) {
+        return res.status(409).json({ message: err.message, code: "STOCK_ERROR", details: err.details });
+      }
+      throw err;
     }
-    
-    res.status(201).json(mongoOrder);
+
+    let mongoOrder;
+    try {
+      mongoOrder = await TransferOrder.create(transferOrderData);
+    } catch (saveErr) {
+      await undoMovements(movements);
+      throw saveErr;
+    }
+    return res.status(201).json(mongoOrder);
+
   } catch (error) {
     console.error("Error creating transfer order:", error);
     console.error("Error stack:", error.stack);
@@ -2119,15 +2155,42 @@ export const updateTransferOrder = async (req, res) => {
     
     const oldStatus = mongoOrder.status;
     const newStatus = transferData.status || oldStatus;
-    
+
+    if (!["draft", "in_transit", "transferred"].includes(newStatus)) {
+      return res.status(400).json({ message: "Invalid status. Must be 'draft', 'in_transit', or 'transferred'" });
+    }
+
+    // ── v2 orders: undo what the old version meant for stock, apply the new version ──
+    let v2Undone = [];
+    let v2Applied = [];
+    if (isV2(mongoOrder)) {
+      const oldPlain = mongoOrder.toObject();
+      const newPlain = { ...oldPlain, status: newStatus, items: Array.isArray(transferData.items) ? transferData.items : oldPlain.items };
+      if (newStatus !== oldStatus || Array.isArray(transferData.items)) {
+        try {
+          v2Undone = await applyTransferEffects(transferEffects(oldPlain), true);
+          try {
+            v2Applied = await applyTransferEffects(transferEffects(newPlain));
+          } catch (err) {
+            await undoMovements(v2Undone);
+            throw err;
+          }
+        } catch (err) {
+          if (err instanceof StockError) return stockConflict(res, err);
+          throw err;
+        }
+      }
+    }
+
+    // ── legacy orders (created before v2) keep the old behaviour ──
     // If changing from draft/in_transit to transferred, only add to destination (source already deducted)
-    if ((oldStatus === "draft" || oldStatus === "in_transit") && newStatus === "transferred") {
+    if (!isV2(mongoOrder) && (oldStatus === "draft" || oldStatus === "in_transit") && newStatus === "transferred") {
       const items = mongoOrder.items || [];
       await batchAddDestinationStock(items, mongoOrder.destinationWarehouse);
     }
     
     // If changing from transferred back to draft/in_transit, only remove from destination (source stays deducted)
-    if (oldStatus === "transferred" && (newStatus === "draft" || newStatus === "in_transit")) {
+    if (!isV2(mongoOrder) && oldStatus === "transferred" && (newStatus === "draft" || newStatus === "in_transit")) {
       const items = mongoOrder.items || [];
       for (const item of items) {
         try {
@@ -2158,8 +2221,15 @@ export const updateTransferOrder = async (req, res) => {
       }, 0);
     }
     if (transferData.attachments) mongoOrder.attachments = transferData.attachments;
-    await mongoOrder.save();
-    
+    try {
+      await mongoOrder.save();
+    } catch (saveErr) {
+      // order unchanged → put stock back the way it was
+      await undoMovements(v2Applied);
+      await undoMovements(v2Undone);
+      throw saveErr;
+    }
+
     console.log(`✅ MongoDB transfer order updated: ${mongoOrder.transferOrderNumber}`);
     return res.status(200).json(mongoOrder);
   } catch (error) {
@@ -2239,13 +2309,33 @@ export const receiveTransferOrder = async (req, res) => {
     }
     
     const items = transferOrder.items || [];
-    
-    console.log(`\n=== RECEIVING TRANSFER ORDER ${id} ===`);
-    console.log(`Source: ${transferOrder.sourceWarehouse} -> Destination: ${transferOrder.destinationWarehouse}`);
-    console.log(`Items to transfer: ${items.length}`);
-    
-    // High-performance batch destination stock update
-    const stockUpdates = await batchAddDestinationStock(items, transferOrder.destinationWarehouse);
+
+    // Claim the order atomically: only ONE request can move it from in_transit to transferred.
+    // (A double-click or a retry used to add the destination stock twice.)
+    const claimed = await TransferOrder.findOneAndUpdate(
+      { _id: transferOrder._id, status: "in_transit" },
+      { $set: { status: "transferred", modifiedBy: modifiedBy || userId || "" } },
+      { new: true }
+    );
+    if (!claimed) {
+      return res.status(409).json({ message: "This transfer order has already been received." });
+    }
+
+    let stockUpdates;
+    if (isV2(transferOrder)) {
+      try {
+        const moved = await applyLines(items, transferOrder.destinationWarehouse, 1);
+        stockUpdates = moved.map((m) => ({ item: m.target.name, quantity: m.delta, status: "success" }));
+      } catch (err) {
+        // Give the order back its in_transit status so it can be received again
+        await TransferOrder.updateOne({ _id: transferOrder._id }, { $set: { status: "in_transit" } });
+        if (err instanceof StockError) return stockConflict(res, err);
+        throw err;
+      }
+    } else {
+      // High-performance batch destination stock update (legacy orders)
+      stockUpdates = await batchAddDestinationStock(items, transferOrder.destinationWarehouse);
+    }
     
     console.log(`\nStock transfer summary:`);
     const successCount = stockUpdates.filter(u => u.status === "success").length;
@@ -2299,7 +2389,21 @@ export const deleteTransferOrder = async (req, res) => {
     
     // If status is "transferred", reverse full stock transfer (both source and destination)
     // If status is "draft" or "in_transit", only restore source stock (destination was never updated)
-    if (transferOrder.status === "transferred") {
+    if (isV2(transferOrder)) {
+      // Undo exactly what this order did to stock. Refused if the destination already sold the pieces.
+      try {
+        await applyTransferEffects(transferEffects(transferOrder.toObject()), true);
+      } catch (err) {
+        if (err instanceof StockError) {
+          return res.status(409).json({
+            message: `Cannot delete this transfer: ${err.message}.`,
+            code: "STOCK_ERROR",
+            details: err.details,
+          });
+        }
+        throw err;
+      }
+    } else if (transferOrder.status === "transferred") {
       console.log(`   ⚠️ Status is "transferred", reversing full stock transfer...`);
       const items = transferOrder.items || [];
       for (const item of items) {

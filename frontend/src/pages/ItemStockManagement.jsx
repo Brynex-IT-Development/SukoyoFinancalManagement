@@ -171,6 +171,7 @@ const ItemStockManagement = ({ modal = false, groupId, itemId: itemIdProp, onClo
         reorder: itemGroup.reorder || "",
         isActive: itemGroup.isActive !== undefined ? itemGroup.isActive : true,
         itemId,
+        stockEdit: true, // only this screen may set stock for this variant
         changedBy: currentUser.username || currentUser.locName || "System",
       };
 

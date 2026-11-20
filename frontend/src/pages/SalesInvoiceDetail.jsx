@@ -447,6 +447,20 @@ const SalesInvoiceDetail = () => {
     return returnItems.reduce((sum, item) => sum + calculateReturnAmountWithTax(item), 0);
   };
 
+  // Take the returned quantity back from the vendors the sale was allocated to (last vendor first)
+  const scaleVendorAllocations = (allocations, returnQty) => {
+    if (!Array.isArray(allocations) || allocations.length === 0) return undefined;
+    let remaining = parseFloat(returnQty) || 0;
+    const result = [];
+    for (const a of [...allocations].reverse()) {
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, parseFloat(a.quantity) || 0);
+      if (take > 0) result.push({ vendorCode: a.vendorCode, quantity: take });
+      remaining -= take;
+    }
+    return result.length ? result : undefined;
+  };
+
   const handleSubmitReturn = async () => {
     const itemsToReturn = returnItems.filter((item) => item.returnQuantity > 0);
 
@@ -492,6 +506,10 @@ const SalesInvoiceDetail = () => {
           itemData: item.itemData,
           size: item.size,
           itemGroupId: item.itemGroupId,
+          itemSku: item.itemSku,
+          // Put the pieces back to the vendor(s) they were sold from
+          vendorCode: item.vendorCode,
+          vendorAllocations: scaleVendorAllocations(item.vendorAllocations, item.returnQuantity),
         })),
         subTotal: returnTotal,
         finalTotal: -returnTotal,
@@ -506,7 +524,8 @@ const SalesInvoiceDetail = () => {
       });
 
       if (!returnResponse.ok) {
-        throw new Error("Failed to create return invoice");
+        const errBody = await returnResponse.json().catch(() => null);
+        throw new Error(errBody?.message || "Failed to create return invoice");
       }
 
       const result = await returnResponse.json();

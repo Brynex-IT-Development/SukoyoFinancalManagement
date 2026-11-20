@@ -46,6 +46,15 @@ const salesInvoiceSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    // true once this invoice's line items have been taken out of (or, for returns, put back into) stock.
+    // Missing on invoices created before this flag existed — those are treated as applied.
+    stockApplied: {
+      type: Boolean,
+    },
+    // Warehouse the stock was actually moved in (so edit/delete reverse in the same place)
+    stockWarehouse: {
+      type: String,
+    },
     category: {
       type: String,
       default: "",

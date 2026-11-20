@@ -1707,9 +1707,11 @@ const SalesInvoiceCreate = () => {
       return;
     }
 
-    // Validate stock for each line item
+    // Validate stock for each line item.
+    // In edit mode the shown stock already excludes this invoice's own pieces, so this
+    // check would wrongly block raising a quantity — the server checks edits correctly.
     const stockValidationErrors = [];
-    for (const item of lineItems) {
+    for (const item of (isEditMode ? [] : lineItems)) {
       if (!item.item || !item.quantity) continue;
       
       const itemData = item.itemData;

@@ -841,10 +841,16 @@ export const updateShoeItem = async (req, res) => {
     delete updateData.targetGroupId;
     delete updateData.targetGroupName;
 
-    // Preserve warehouseStocks if not being updated
-    if (!updateData.warehouseStocks && oldItem.warehouseStocks) {
-      updateData.warehouseStocks = oldItem.warehouseStocks;
+    // STOCK PROTECTION: stock is never written from a normal item edit — the form's copy
+    // of warehouseStocks is from when the page was opened and would undo sales made since.
+    // Only the stock screen (stockEdit: true) may set it. Leaving the field out of $set
+    // keeps whatever is in the database right now.
+    if (req.body.stockEdit !== true) {
+      delete updateData.warehouseStocks;
     }
+    delete updateData.stockEdit;
+    delete updateData.vendorPrices;      // per-vendor quantities are maintained by bills/sales
+    delete updateData.vendorItemNames;
 
     const updatedItem = await ShoeItem.findByIdAndUpdate(
       itemId,

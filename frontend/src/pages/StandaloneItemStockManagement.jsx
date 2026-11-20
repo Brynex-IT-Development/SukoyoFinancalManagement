@@ -244,6 +244,7 @@ const StandaloneItemStockManagement = () => {
         sellable: item.sellable !== undefined ? item.sellable : true,
         purchasable: item.purchasable !== undefined ? item.purchasable : true,
         warehouseStocks: stockData,
+        stockEdit: true, // only this screen may set stock
         changedBy: changedBy,
       };
 

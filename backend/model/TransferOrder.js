@@ -78,6 +78,11 @@ const transferOrderSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    // "v2" = stock for this order is moved by utils/stockService (strict, atomic, validated).
+    // Orders without it were created by the old logic and keep using it.
+    stockEngine: {
+      type: String,
+    },
     
     // Totals
     totalQuantityTransferred: {

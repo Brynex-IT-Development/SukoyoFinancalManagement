@@ -30,6 +30,32 @@ import VendorBreakdown from "../components/VendorBreakdown.jsx";
 
 const API_ROOT = (baseUrl?.baseUrl || "").replace(/\/$/, "");
 
+// Keep only the basic formatting the description editor produces; drop every attribute,
+// script and unknown tag so stored HTML can't run code when shown.
+const ALLOWED_DESC_TAGS = new Set(["B", "STRONG", "I", "EM", "U", "UL", "OL", "LI", "P", "BR", "DIV", "SPAN", "CODE", "PRE", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD"]);
+const sanitizeDescription = (html) => {
+  if (!html || typeof html !== "string" || typeof DOMParser === "undefined") return "";
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const clean = (node) => {
+    [...node.childNodes].forEach((child) => {
+      if (child.nodeType === 3) return; // text
+      if (child.nodeType !== 1 || !ALLOWED_DESC_TAGS.has(child.tagName)) {
+        if (child.nodeType === 1 && !["SCRIPT", "STYLE", "IFRAME", "OBJECT"].includes(child.tagName)) {
+          clean(child);
+          child.replaceWith(...child.childNodes); // unwrap unknown tag, keep its text
+        } else {
+          child.remove();
+        }
+        return;
+      }
+      [...child.attributes].forEach((a) => child.removeAttribute(a.name));
+      clean(child);
+    });
+  };
+  clean(doc.body);
+  return doc.body.textContent.trim() ? doc.body.innerHTML : "";
+};
+
 const unitOptions = [
   "box",
   "cm",
@@ -1414,6 +1440,26 @@ const ShoeSalesItemDetail = () => {
                     </div>
                   )}
 
+                  {(item.salesDescription || item.description) && (
+                    <div className="space-y-6">
+                      {item.salesDescription && (
+                        <div>
+                          <h3 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">Short Description</h3>
+                          <p className="text-sm text-[#1a1a2e] whitespace-pre-line">{item.salesDescription}</p>
+                        </div>
+                      )}
+                      {sanitizeDescription(item.description) && (
+                        <div>
+                          <h3 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">Description</h3>
+                          <div
+                            className="text-sm text-[#1a1a2e] [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5"
+                            dangerouslySetInnerHTML={{ __html: sanitizeDescription(item.description) }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-x-16 gap-y-10">
                   {/* Left Column */}
                   <div className="space-y-10">
@@ -1478,11 +1524,15 @@ const ShoeSalesItemDetail = () => {
                         </div>
                         <div className="flex justify-between items-center py-2">
                           <span className="text-sm text-[#64748b]">Purchase Tax</span>
-                          <span className="text-sm font-medium text-[#1a1a2e]">{item.purchaseTax || "—"}</span>
+                          <span className="text-sm font-medium text-[#1a1a2e]">
+                            {item.purchaseTax ? `${item.purchaseTax}${item.purchaseInclusive ? " (Inclusive)" : " (Exclusive)"}` : "—"}
+                          </span>
                         </div>
                         <div className="flex justify-between items-center py-2">
                           <span className="text-sm text-[#64748b]">Sales Tax</span>
-                          <span className="text-sm font-medium text-[#1a1a2e]">{item.salesTax || "—"}</span>
+                          <span className="text-sm font-medium text-[#1a1a2e]">
+                            {item.salesTax ? `${item.salesTax}${item.salesInclusive === false ? " (Exclusive)" : " (Inclusive)"}` : "—"}
+                          </span>
                         </div>
                         <div className="flex justify-between items-center py-2">
                           <span className="text-sm text-[#64748b]">Cess %</span>
@@ -1537,7 +1587,7 @@ const ShoeSalesItemDetail = () => {
                         </div>
                         <div className="flex justify-between items-center py-2">
                           <span className="text-sm text-[#64748b]">Category</span>
-                          <span className="text-sm font-medium text-[#1a1a2e]">{item.category || "—"}</span>
+                          <span className="text-sm font-medium text-[#1a1a2e]">{item.itemCategory || item.category || "—"}</span>
                         </div>
                         <div className="flex justify-between items-center py-2">
                           <span className="text-sm text-[#64748b]">Sub Category</span>

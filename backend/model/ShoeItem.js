@@ -258,6 +258,27 @@ const ShoeItemSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+
+    // ---- Fields captured by the New/Edit Item form (ItemFormNew.jsx) ----
+    printName: { type: String, trim: true },
+    // `category` is restricted to shirt/shoe/other, so the picked label lives here.
+    itemCategory: { type: String, trim: true },
+    subCategory: { type: String, trim: true },
+    subBrand: { type: String, trim: true },
+    description: { type: String }, // rich-text HTML from the description editor
+    purchaseTax: { type: String, trim: true },
+    salesTax: { type: String, trim: true },
+    purchaseInclusive: { type: Boolean, default: false },
+    salesInclusive: { type: Boolean, default: true },
+    cess: { type: Boolean, default: false },
+    manageBatch: { type: Boolean, default: false },
+    purchasePrice: { type: Number },
+    landingCost: { type: Number },
+    sellingDiscount: { type: Number },
+    sellingMargin: { type: Number },
+    membershipMargin: { type: Number },
+    openingQty: { type: Number },
+    netWeight: { type: Number },
   },
   {
     timestamps: true,
@@ -271,7 +292,7 @@ ShoeItemSchema.index({ category: 1 });
 ShoeItemSchema.index({ brand: 1 });
 ShoeItemSchema.index({ manufacturer: 1 });
 ShoeItemSchema.index({ createdAt: -1 });
-ShoeItemSchema.index({ "stockByWarehouse.warehouse": 1 });
+ShoeItemSchema.index({ "warehouseStocks.warehouse": 1 }); // was "stockByWarehouse.warehouse", a field that does not exist
 
 const ShoeItem = mongoose.model("ShoeItem", ShoeItemSchema);
 

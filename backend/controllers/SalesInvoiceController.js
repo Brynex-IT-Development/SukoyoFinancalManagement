@@ -1,11 +1,42 @@
 import SalesInvoice from "../model/SalesInvoice.js";
 import { nextGlobalSalesInvoice } from "../utils/nextSalesInvoice.js";
-import { updateStockOnInvoiceCreate, reverseStockOnInvoiceDelete } from "../utils/ultraEnhancedStockManagement.js";
-import { validateStockBeforeInvoice, validateStockAfterInvoice } from "../utils/stockValidationSystem.js";
+import { applyLines, undoMovements, StockError } from "../utils/stockService.js";
+import { checkAndCreateReorderAlerts } from "../utils/reorderNotification.js";
+import { updateMonthlyStockForSale } from "../utils/monthlyStockTracking.js";
 import Transaction from "../model/Transaction.js";
 import User from "../model/UserModel.js";
 import mongoose from "mongoose";
 import { assignVendorsToLines, applyVendorAllocations } from "../utils/vendorStock.js";
+
+// ─── Stock helpers ──────────────────────────────────────────────────────────
+const RETURN_CATEGORIES = ["return", "refund", "cancel"];
+const isReturnCategory = (category) => RETURN_CATEGORIES.includes((category || "").toLowerCase().trim());
+
+// The ONE rule for which warehouse an invoice moves stock in (create, edit and delete all use it).
+const invoiceWarehouse = (inv) => (inv?.stockWarehouse || inv?.warehouse || inv?.branch || "Warehouse").toString().trim();
+
+// A sale takes stock out (-1); a return / refund / cancel puts it back (+1).
+const stockSign = (category) => (isReturnCategory(category) ? 1 : -1);
+
+const stockErrorResponse = (res, err) =>
+  res.status(409).json({
+    message: err.message,
+    code: "STOCK_ERROR",
+    details: err.details || {},
+  });
+
+// Non-critical follow-ups after stock moved (monthly tracking + reorder alerts). Never throws.
+const afterStockMoved = (movements, lineItems, warehouse) => {
+  setImmediate(async () => {
+    for (const m of movements) {
+      if (m.target.kind !== "group" || m.delta >= 0) continue;
+      try {
+        await updateMonthlyStockForSale(String(m.target.groupId), String(m.target.itemId), m.warehouse, -m.delta, m.target.name);
+      } catch (e) { /* tracking only */ }
+    }
+    try { await checkAndCreateReorderAlerts(lineItems, warehouse); } catch (e) { /* alerts only */ }
+  });
+};
 
 // ✅ Helper function to allocate payment amounts based on payment method
 const allocatePaymentAmounts = (invoice) => {
@@ -149,41 +180,50 @@ export const createSalesInvoice = async (req, res) => {
     invoiceData.storeId = user.storeId;
 
     // Decide which vendor each sold piece comes from (cashier choice, else oldest stock first)
-    const isReturnInvoice = ["return", "refund", "cancel"].includes(categoryLower.trim());
+    const isReturnInvoice = isReturnCategory(invoiceData.category);
     if (!isReturnInvoice && Array.isArray(invoiceData.lineItems)) {
       await assignVendorsToLines(invoiceData.lineItems);
     }
 
-    // Save invoice to MongoDB
-    const invoice = await SalesInvoice.create(invoiceData);
+    // ── STOCK FIRST ──────────────────────────────────────────────────────
+    // Stock is moved BEFORE the invoice is saved, atomically and all-or-nothing.
+    // If any item does not have enough stock the whole sale is rejected (409)
+    // and nothing is changed — no more invoices saved with stock silently not deducted.
+    const warehouse = invoiceWarehouse(invoiceData);
+    const sign = stockSign(invoiceData.category);
+    let movements = [];
+    try {
+      movements = await applyLines(invoiceData.lineItems || [], warehouse, sign);
+    } catch (err) {
+      if (err instanceof StockError) return stockErrorResponse(res, err);
+      throw err;
+    }
+    invoiceData.stockApplied = true;
+    invoiceData.stockWarehouse = warehouse;
 
-    // Respond immediately — don't wait for stock/transaction updates
+    let invoice;
+    try {
+      invoice = await SalesInvoice.create(invoiceData);
+    } catch (saveErr) {
+      await undoMovements(movements); // invoice not saved → put the stock back
+      throw saveErr;
+    }
+
+    // Per-vendor stock: a sale takes from the vendor, a return puts it back
+    try {
+      await applyVendorAllocations(invoice.lineItems, sign > 0 ? 1 : -1);
+    } catch (err) {
+      console.error("Vendor allocation error:", err.message);
+    }
+
     res.status(201).json(invoice);
 
-    // Run stock update + financial transaction in background (non-blocking)
+    afterStockMoved(movements, invoice.lineItems, warehouse);
     setImmediate(async () => {
       try {
         await createFinancialTransaction(invoice);
       } catch (err) {
         console.error("Background financial transaction error:", err.message);
-      }
-
-      if (invoice.lineItems?.length > 0) {
-        const warehouse = invoice.warehouse || invoice.branch || "Warehouse";
-        const shouldReverseStock = ["return", "refund", "cancel"].includes(
-          (invoice.category || "").toLowerCase().trim()
-        );
-        try {
-          if (shouldReverseStock) {
-            await reverseStockOnInvoiceDelete(invoice.lineItems, warehouse);
-          } else {
-            await updateStockOnInvoiceCreate(invoice.lineItems, warehouse);
-          }
-          // Per-vendor stock: a sale takes from the vendor, a return puts it back
-          await applyVendorAllocations(invoice.lineItems, shouldReverseStock ? 1 : -1);
-        } catch (err) {
-          console.error("Background stock update error:", err.message);
-        }
       }
     });
 
@@ -317,21 +357,6 @@ const updateFinancialTransaction = async (invoice) => {
     );
     
     console.log("✅ MongoDB transaction updated:", updatedTransaction.invoiceNo);
-
-    // Update transaction in PostgreSQL if it exists
-    try {
-      const postgresTransaction = await TransactionPostgres.findOne({
-        where: { invoiceNo: invoice.invoiceNumber }
-      });
-      
-      if (postgresTransaction) {
-        await postgresTransaction.update(updateData);
-        console.log("✅ PostgreSQL transaction updated:", postgresTransaction.invoiceNo);
-      }
-    } catch (postgresError) {
-      console.error("❌ Error updating transaction in PostgreSQL:", postgresError);
-      // Don't fail if PostgreSQL fails
-    }
 
     console.log("Updated transaction details:", {
       type: transactionType,
@@ -536,13 +561,64 @@ export const updateSalesInvoice = async (req, res) => {
       req.body.returnStatus = req.body.returnStatus.toLowerCase();
     }
 
-    const invoice = await SalesInvoice.findByIdAndUpdate(
-      id,
-      req.body,
-      { new: true, runValidators: true }
-    );
+    const oldInvoice = await SalesInvoice.findById(id).lean();
+    if (!oldInvoice) {
+      return res.status(404).json({ message: "Sales invoice not found" });
+    }
+
+    // Clients may not set the stock bookkeeping fields directly
+    delete req.body.stockApplied;
+    delete req.body.stockWarehouse;
+
+    // A return-triggered update (original invoice trimmed after a return) must NOT move stock:
+    // the separate RTN- invoice already put the returned pieces back.
+    const isReturnUpdate = req.body.returnStatus === "partial" || req.body.returnStatus === "full";
+
+    // ── STOCK: apply the difference between the old and the new invoice ──
+    // Done as "undo old lines, apply new lines" so changes of quantity, item,
+    // warehouse or category are all handled the same way. All-or-nothing.
+    let undoOld = [];
+    let applyNew = [];
+    const linesChanged = Array.isArray(req.body.lineItems);
+    const whChanged = (req.body.warehouse !== undefined || req.body.branch !== undefined);
+    const catChanged = req.body.category !== undefined && isReturnCategory(req.body.category) !== isReturnCategory(oldInvoice.category);
+    if (!isReturnUpdate && oldInvoice.stockApplied !== false && (linesChanged || whChanged || catChanged)) {
+      const merged = { ...oldInvoice, ...req.body, stockWarehouse: undefined };
+      const oldWh = invoiceWarehouse(oldInvoice);
+      const newWh = invoiceWarehouse(merged);
+      const newLines = linesChanged ? req.body.lineItems : oldInvoice.lineItems || [];
+      try {
+        undoOld = await applyLines(oldInvoice.lineItems || [], oldWh, -stockSign(oldInvoice.category));
+        try {
+          applyNew = await applyLines(newLines, newWh, stockSign(merged.category));
+        } catch (err) {
+          await undoMovements(undoOld);
+          throw err;
+        }
+      } catch (err) {
+        if (err instanceof StockError) return stockErrorResponse(res, err);
+        throw err;
+      }
+      req.body.stockApplied = true;
+      req.body.stockWarehouse = newWh;
+    }
+
+    let invoice;
+    try {
+      invoice = await SalesInvoice.findByIdAndUpdate(
+        id,
+        req.body,
+        { new: true, runValidators: true }
+      );
+    } catch (updateErr) {
+      await undoMovements(applyNew);
+      await undoMovements(undoOld);
+      throw updateErr;
+    }
 
     if (!invoice) {
+      await undoMovements(applyNew);
+      await undoMovements(undoOld);
       return res
         .status(404)
         .json({ message: "Sales invoice not found" });
@@ -551,7 +627,6 @@ export const updateSalesInvoice = async (req, res) => {
     // ✅ UPDATE CORRESPONDING FINANCIAL TRANSACTION
     // Skip payment field updates when this is a return-triggered update (returnStatus set)
     // to preserve the original invoice's cash/bank/upi/amount in the day book
-    const isReturnUpdate = req.body.returnStatus === "partial" || req.body.returnStatus === "full";
     try {
       if (isReturnUpdate) {
         // Do NOT update billValue on the original invoice's transaction when a return is processed.
@@ -651,17 +726,22 @@ export const deleteSalesInvoice = async (req, res) => {
       });
     }
 
-    // ✅ REVERSE STOCK FOR BOOKING INVOICES
-    try {
-      if (invoiceToDelete.category === "booking" && invoiceToDelete.lineItems && invoiceToDelete.lineItems.length > 0) {
-        const warehouse = invoiceToDelete.warehouse || "Warehouse";
-        await reverseStockOnInvoiceDelete(invoiceToDelete.lineItems, warehouse);
-        await applyVendorAllocations(invoiceToDelete.lineItems, 1);
-        console.log("✅ Stock reversed successfully for deleted booking invoice");
+    // ✅ PUT THE SOLD PIECES BACK INTO STOCK (every sale category, not only bookings),
+    // in the same warehouse they were taken from. If this fails the invoice is NOT deleted,
+    // so stock and invoices can never drift apart.
+    let restored = [];
+    if (invoiceToDelete.stockApplied !== false && invoiceToDelete.lineItems?.length > 0) {
+      try {
+        restored = await applyLines(invoiceToDelete.lineItems, invoiceWarehouse(invoiceToDelete), 1);
+      } catch (stockError) {
+        if (stockError instanceof StockError) return stockErrorResponse(res, stockError);
+        throw stockError;
       }
-    } catch (stockError) {
-      console.error("❌ Error reversing stock:", stockError);
-      // Don't fail the deletion if stock reversal fails
+      try {
+        await applyVendorAllocations(invoiceToDelete.lineItems, 1);
+      } catch (e) {
+        console.error("Vendor allocation reversal error:", e.message);
+      }
     }
 
     // ✅ DELETE ASSOCIATED TRANSACTION RECORD (only for non-return invoices)
@@ -679,18 +759,12 @@ export const deleteSalesInvoice = async (req, res) => {
       // Don't fail the deletion if transaction deletion fails
     }
 
-    // ✅ DELETE FROM POSTGRESQL IF EXISTS
     try {
-      await SalesInvoicePostgres.destroy({
-        where: { invoiceNumber: invoiceToDelete.invoiceNumber }
-      });
-      console.log("✅ PostgreSQL invoice record deleted");
-    } catch (postgresError) {
-      console.error("❌ Error deleting from PostgreSQL:", postgresError);
-      // Don't fail if PostgreSQL deletion fails
+      await SalesInvoice.findByIdAndDelete(id);
+    } catch (deleteErr) {
+      await undoMovements(restored); // invoice still exists → take the stock out again
+      throw deleteErr;
     }
-
-    const deletedInvoice = await SalesInvoice.findByIdAndDelete(id);
 
     res
       .status(200)

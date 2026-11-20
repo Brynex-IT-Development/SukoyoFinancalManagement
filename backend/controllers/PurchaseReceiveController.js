@@ -4,6 +4,7 @@ import ShoeItem from "../model/ShoeItem.js";
 import ItemGroup from "../model/ItemGroup.js";
 import { nextPurchaseReceive } from "../utils/nextPurchaseReceive.js";
 import { updateMonthlyStockForPurchase } from "../utils/monthlyStockTracking.js";
+import { resolveLine, moveStock, getStock, applyLines, StockError } from "../utils/stockService.js";
 
 // Helper function to map locName to warehouse name (same as other controllers)
 const mapLocNameToWarehouse = (locName) => {
@@ -84,502 +85,42 @@ const matchesWarehouse = (itemWarehouse, targetWarehouse) => {
   return false;
 };
 
-// Helper function to update stock for an item (handles both standalone and group items)
-const updateItemStock = async (itemIdValue, receivedQty, operation = 'add', itemName = null, itemGroupId = null, targetWarehouse = null) => {
-  // Determine target warehouse - use provided or default to "Warehouse"
-  const defaultWarehouseName = targetWarehouse || "Warehouse";
-  console.log(`📦 updateItemStock: targetWarehouse="${defaultWarehouseName}", operation="${operation}", qty=${receivedQty}`);
-  
-  // Helper function to update warehouse stock
-  const updateWarehouseStock = (warehouseStocks, qty) => {
-    if (!warehouseStocks || warehouseStocks.length === 0) {
-      console.log(`   Creating new warehouse stock entry for "${defaultWarehouseName}"`);
-      return [{
-        warehouse: defaultWarehouseName,
-        openingStock: 0,
-        openingStockValue: 0,
-        stockOnHand: qty,
-        committedStock: 0,
-        availableForSale: qty,
-        physicalOpeningStock: 0,
-        physicalStockOnHand: qty,
-        physicalCommittedStock: 0,
-        physicalAvailableForSale: qty,
-      }];
-    }
-    
-    // Use flexible matching to find warehouse stock
-    let warehouseStock = warehouseStocks.find(ws => 
-      matchesWarehouse(ws.warehouse, defaultWarehouseName)
-    );
-    
-    if (!warehouseStock) {
-      console.log(`   Warehouse "${defaultWarehouseName}" not found, creating new entry`);
-      warehouseStock = {
-        warehouse: defaultWarehouseName,
-        openingStock: 0,
-        openingStockValue: 0,
-        stockOnHand: 0,
-        committedStock: 0,
-        availableForSale: 0,
-        physicalOpeningStock: 0,
-        physicalStockOnHand: 0,
-        physicalCommittedStock: 0,
-        physicalAvailableForSale: 0,
-      };
-      warehouseStocks.push(warehouseStock);
-    } else {
-      console.log(`   ✅ Found existing warehouse stock for "${warehouseStock.warehouse}" (matched with "${defaultWarehouseName}")`);
-    }
-    
-    const currentStockOnHand = parseFloat(warehouseStock.stockOnHand) || 0;
-    const currentAvailableForSale = parseFloat(warehouseStock.availableForSale) || 0;
-    const currentPhysicalStockOnHand = parseFloat(warehouseStock.physicalStockOnHand) || 0;
-    const currentPhysicalAvailableForSale = parseFloat(warehouseStock.physicalAvailableForSale) || 0;
-    
-    console.log(`   📊 Current stock values: stockOnHand=${currentStockOnHand}, availableForSale=${currentAvailableForSale}, qty to add=${qty}`);
-    
-    warehouseStock.warehouse = defaultWarehouseName; // Normalize to target warehouse name
-    
-    if (operation === 'add') {
-      const newStockOnHand = currentStockOnHand + qty;
-      const newAvailableForSale = currentAvailableForSale + qty;
-      const newPhysicalStockOnHand = currentPhysicalStockOnHand + qty;
-      const newPhysicalAvailableForSale = currentPhysicalAvailableForSale + qty;
-      
-      warehouseStock.stockOnHand = newStockOnHand;
-      warehouseStock.availableForSale = newAvailableForSale;
-      warehouseStock.physicalStockOnHand = newPhysicalStockOnHand;
-      warehouseStock.physicalAvailableForSale = newPhysicalAvailableForSale;
-      
-      console.log(`   ✅ Added ${qty} to stock: ${currentStockOnHand} -> ${newStockOnHand}`);
-      console.log(`   📊 Updated warehouseStock object:`, JSON.stringify(warehouseStock, null, 2));
-    } else if (operation === 'subtract') {
-      warehouseStock.stockOnHand = Math.max(0, currentStockOnHand - qty);
-      warehouseStock.availableForSale = Math.max(0, currentAvailableForSale - qty);
-      warehouseStock.physicalStockOnHand = Math.max(0, currentPhysicalStockOnHand - qty);
-      warehouseStock.physicalAvailableForSale = Math.max(0, currentPhysicalAvailableForSale - qty);
-      console.log(`   ✅ Subtracted ${qty} from stock: ${currentStockOnHand} -> ${warehouseStock.stockOnHand}`);
-    } else if (operation === 'adjust') {
-      // For adjust, qty is the difference
-      warehouseStock.stockOnHand = currentStockOnHand + qty;
-      warehouseStock.availableForSale = currentAvailableForSale + qty;
-      warehouseStock.physicalStockOnHand = currentPhysicalStockOnHand + qty;
-      warehouseStock.physicalAvailableForSale = currentPhysicalAvailableForSale + qty;
-      console.log(`   ✅ Adjusted stock by ${qty}: ${currentStockOnHand} -> ${warehouseStock.stockOnHand}`);
-    }
-    
-    return warehouseStocks;
-  };
-  
-  // First, try to find as standalone item
-  let shoeItem = await ShoeItem.findById(itemIdValue);
-  if (shoeItem) {
-    console.log(`   Found standalone item: "${shoeItem.itemName}"`);
-    const oldStock = shoeItem.warehouseStocks?.find(ws => matchesWarehouse(ws.warehouse, defaultWarehouseName))?.stockOnHand || 0;
-    
-    // Convert to plain object, modify, then update using $set
-    const itemPlain = shoeItem.toObject();
-    
-    if (!itemPlain.warehouseStocks || !Array.isArray(itemPlain.warehouseStocks)) {
-      itemPlain.warehouseStocks = [];
-    }
-    
-    // Find or create warehouse stock entry
-    let wsEntry = itemPlain.warehouseStocks.find(ws => 
-      matchesWarehouse(ws.warehouse, defaultWarehouseName)
-    );
-    
-    if (!wsEntry) {
-      wsEntry = {
-        warehouse: defaultWarehouseName,
-        openingStock: 0,
-        openingStockValue: 0,
-        stockOnHand: 0,
-        committedStock: 0,
-        availableForSale: 0,
-        physicalOpeningStock: 0,
-        physicalStockOnHand: 0,
-        physicalCommittedStock: 0,
-        physicalAvailableForSale: 0,
-      };
-      itemPlain.warehouseStocks.push(wsEntry);
-    }
-    
-    // Update stock values
-    const currentStock = parseFloat(wsEntry.stockOnHand) || 0;
-    wsEntry.stockOnHand = currentStock + receivedQty;
-    wsEntry.availableForSale = (parseFloat(wsEntry.availableForSale) || 0) + receivedQty;
-    wsEntry.physicalStockOnHand = (parseFloat(wsEntry.physicalStockOnHand) || 0) + receivedQty;
-    wsEntry.physicalAvailableForSale = (parseFloat(wsEntry.physicalAvailableForSale) || 0) + receivedQty;
-    wsEntry.warehouse = defaultWarehouseName;
-    
-    console.log(`   📊 Stock update: ${currentStock} + ${receivedQty} = ${wsEntry.stockOnHand}`);
-    
-    // Update using $set to replace entire warehouseStocks array
-    const updatedItem = await ShoeItem.findByIdAndUpdate(
-      itemIdValue,
-      {
-        $set: {
-          warehouseStocks: itemPlain.warehouseStocks
-        }
-      },
-      { new: true }
-    );
-    
-    if (!updatedItem) {
-      console.error(`❌ Failed to update standalone item stock`);
-      return { success: false, message: "Failed to update stock" };
-    }
-    
-    const updatedStock = updatedItem.warehouseStocks.find(ws => matchesWarehouse(ws.warehouse, defaultWarehouseName)) || updatedItem.warehouseStocks[0];
-    console.log(`   ✅ Updated stock for standalone item: ${oldStock} + ${receivedQty} = ${updatedStock?.stockOnHand || 0} in "${updatedStock?.warehouse || defaultWarehouseName}"`);
-    return { success: true, type: 'standalone', stock: updatedStock };
-  }
-  
-  // Item not found in standalone items, try to find in item groups
-  console.log(`🔍 Searching for item ${itemIdValue} in item groups...`);
-  console.log(`   Item name: ${itemName || 'not provided'}, ItemGroupId: ${itemGroupId || 'not provided'}`);
-  
-  // If we have itemGroupId, search only that group first (more efficient)
-  let itemGroups = [];
-  if (itemGroupId) {
-    const specificGroup = await ItemGroup.findById(itemGroupId);
-    if (specificGroup && specificGroup.isActive !== false) {
-      itemGroups = [specificGroup];
-      console.log(`   Searching in specific group: ${specificGroup.name}`);
-    }
-  }
-  
-  // If not found in specific group or no itemGroupId provided, search all groups
-  if (itemGroups.length === 0) {
-    itemGroups = await ItemGroup.find({ isActive: { $ne: false } });
-    console.log(`   Found ${itemGroups.length} active item groups to search`);
-  }
-  
-  const itemIdStr = itemIdValue?.toString();
-  
-  for (const group of itemGroups) {
-    if (group.items && Array.isArray(group.items)) {
-      for (let i = 0; i < group.items.length; i++) {
-        const groupItem = group.items[i];
-        
-        // Try multiple ID matching strategies
-        const groupItemId = groupItem._id?.toString();
-        const compositeId = `${group._id}_${i}`;
-        const groupIdStr = group._id?.toString();
-        
-        // Check various ID formats
-        let idMatches = false;
-        
-        // Normalize both IDs to strings for comparison
-        const normalizedGroupItemId = groupItemId ? String(groupItemId) : null;
-        const normalizedItemId = itemIdStr ? String(itemIdStr) : null;
-        const normalizedCompositeId = String(compositeId);
-        
-        // Direct ID match (exact match)
-        if (normalizedGroupItemId && normalizedItemId && normalizedGroupItemId === normalizedItemId) {
-          idMatches = true;
-          console.log(`   ✅ Direct ID match: ${normalizedGroupItemId} === ${normalizedItemId}`);
-        }
-        // Composite ID match
-        else if (normalizedCompositeId === normalizedItemId) {
-          idMatches = true;
-          console.log(`   ✅ Composite ID match: ${normalizedCompositeId} === ${normalizedItemId}`);
-        }
-        // Check if itemIdStr contains group ID and index (for composite IDs with different formats)
-        else if (normalizedItemId && groupIdStr && normalizedItemId.includes(String(groupIdStr)) && normalizedItemId.includes(`_${i}`)) {
-          idMatches = true;
-          console.log(`   ✅ Partial composite ID match: ${normalizedItemId} contains ${groupIdStr} and _${i}`);
-        }
-        // Try matching just the ObjectId part (in case only the ObjectId is stored)
-        else if (normalizedItemId && normalizedGroupItemId) {
-          // Check if the itemId is just the ObjectId (first 24 chars of composite)
-          if (normalizedItemId === normalizedGroupItemId || normalizedItemId.startsWith(normalizedGroupItemId)) {
-            idMatches = true;
-            console.log(`   ✅ ObjectId prefix match: ${normalizedItemId} starts with ${normalizedGroupItemId}`);
-          }
-          // Also check reverse - if groupItemId contains the itemId
-          else if (normalizedGroupItemId.includes(normalizedItemId)) {
-            idMatches = true;
-            console.log(`   ✅ ObjectId contains match: ${normalizedGroupItemId} contains ${normalizedItemId}`);
-          }
-        }
-        
-        // If still no match, try comparing just the ObjectId hex strings (remove any prefixes/suffixes)
-        if (!idMatches && normalizedItemId && normalizedGroupItemId) {
-          // Extract just the hex part (MongoDB ObjectIds are 24 hex characters)
-          const itemIdHex = normalizedItemId.replace(/[^0-9a-fA-F]/g, '').substring(0, 24);
-          const groupItemIdHex = normalizedGroupItemId.replace(/[^0-9a-fA-F]/g, '').substring(0, 24);
-          if (itemIdHex && groupItemIdHex && itemIdHex === groupItemIdHex && itemIdHex.length === 24) {
-            idMatches = true;
-            console.log(`   ✅ Hex ID match: ${itemIdHex} === ${groupItemIdHex}`);
-          }
-        }
-        
-        // Also try matching by item name if provided (as fallback)
-        let nameMatches = false;
-        if (itemName && groupItem.name && groupItem.name.trim() === itemName.trim()) {
-          nameMatches = true;
-          console.log(`   ✅ Name match: "${groupItem.name}" === "${itemName}"`);
-        }
-        
-        if (idMatches || nameMatches) {
-          console.log(`✅ Found item in group "${group.name}" at index ${i}`);
-          console.log(`   Item name: ${groupItem.name}`);
-          console.log(`   Group item ID: ${groupItemId || 'none'}, Composite ID: ${compositeId}`);
-          console.log(`   Searching for: ${itemIdStr}`);
-          console.log(`   Matched by: ${idMatches ? 'ID' : 'Name'}`);
-          
-          // Update warehouse stocks for this item
-          groupItem.warehouseStocks = updateWarehouseStock(groupItem.warehouseStocks || [], receivedQty);
-          
-          // Mark item as modified
-          group.items[i] = groupItem;
-          group.markModified('items');
-          
-          await group.save();
-          
-          // Update monthly opening stock for purchase
-          try {
-            const itemId = groupItem._id?.toString() || groupItem.id?.toString();
-            if (itemId && operation === 'add') {
-              await updateMonthlyStockForPurchase(group._id.toString(), itemId, defaultWarehouseName, receivedQty, groupItem.name);
-            }
-          } catch (monthlyError) {
-            console.error(`   ⚠️ Error updating monthly stock (non-critical):`, monthlyError);
-          }
-          
-          const updatedStock = groupItem.warehouseStocks.find(ws => matchesWarehouse(ws.warehouse, defaultWarehouseName)) || groupItem.warehouseStocks[0];
-          console.log(`✅ Successfully updated stock for item "${groupItem.name}" in group "${group.name}": ${updatedStock?.stockOnHand || 0} in "${updatedStock?.warehouse || defaultWarehouseName}"`);
-          return { success: true, type: 'group', stock: updatedStock, groupName: group.name, itemName: groupItem.name };
-        }
-      }
-    }
-  }
-  
-  console.warn(`⚠️ Item with ID ${itemIdValue} not found in any item groups`);
-  console.warn(`   Searched ${itemGroups.length} groups`);
-  return { success: false, message: `Item with ID ${itemIdValue} not found` };
-};
-
-// Helper function to update stock for an item by name and SKU within a group (when itemId is null)
-const updateItemStockByName = async (itemGroupId, itemName, receivedQty, operation = 'add', itemSku = null, targetWarehouse = null) => {
-  // Determine target warehouse - use provided or default to "Warehouse"
-  const defaultWarehouseName = targetWarehouse || "Warehouse";
-  console.log(`📦 updateItemStockByName: targetWarehouse="${defaultWarehouseName}", operation="${operation}", qty=${receivedQty}, itemName="${itemName}"`);
-  
-  if (!itemGroupId || !itemName) {
-    return { success: false, message: "itemGroupId and itemName are required when itemId is null" };
-  }
-  
-  console.log(`🔍 Searching for item by name "${itemName}"${itemSku ? ` and SKU "${itemSku}"` : ''} in group ${itemGroupId}...`);
-  
-  const group = await ItemGroup.findById(itemGroupId);
-  if (!group || group.isActive === false) {
-    return { success: false, message: `Item group ${itemGroupId} not found or inactive` };
-  }
-  
-  if (!group.items || !Array.isArray(group.items)) {
-    return { success: false, message: `Item group ${itemGroupId} has no items` };
-  }
-  
-  // Find item by name and SKU (if SKU is provided, match both; otherwise match by name only)
-  let itemIndex = -1;
-  if (itemSku) {
-    // Match by both name AND SKU for better accuracy
-    itemIndex = group.items.findIndex(gi => {
-      const nameMatch = gi.name && gi.name.trim() === itemName.trim();
-      const skuMatch = gi.sku && gi.sku.trim() === itemSku.trim();
-      return nameMatch && skuMatch;
-    });
-    
-    if (itemIndex === -1) {
-      console.warn(`⚠️ Item with name "${itemName}" and SKU "${itemSku}" not found, trying name only...`);
-      // Fallback to name only if SKU match fails
-      itemIndex = group.items.findIndex(gi => gi.name && gi.name.trim() === itemName.trim());
-    }
-  } else {
-    // Match by name only if SKU is not provided
-    itemIndex = group.items.findIndex(gi => gi.name && gi.name.trim() === itemName.trim());
-  }
-  
-  if (itemIndex === -1) {
-    console.warn(`⚠️ Item with name "${itemName}"${itemSku ? ` and SKU "${itemSku}"` : ''} not found in group "${group.name}"`);
-    return { success: false, message: `Item with name "${itemName}"${itemSku ? ` and SKU "${itemSku}"` : ''} not found in group` };
-  }
-  
-  const groupItem = group.items[itemIndex];
-  console.log(`✅ Found item "${groupItem.name}" in group "${group.name}" at index ${itemIndex}`);
-  
-  // Helper function to update warehouse stock (same as in updateItemStock)
-  const updateWarehouseStock = (warehouseStocks, qty) => {
-    if (!warehouseStocks || warehouseStocks.length === 0) {
-      return [{
-        warehouse: defaultWarehouseName,
-        openingStock: 0,
-        openingStockValue: 0,
-        stockOnHand: qty,
-        committedStock: 0,
-        availableForSale: qty,
-        physicalOpeningStock: 0,
-        physicalStockOnHand: qty,
-        physicalCommittedStock: 0,
-        physicalAvailableForSale: qty,
-      }];
-    }
-    
-    // Use flexible matching to find warehouse stock
-    let warehouseStock = warehouseStocks.find(ws => 
-      matchesWarehouse(ws.warehouse, defaultWarehouseName)
-    );
-    
-    if (!warehouseStock) {
-      warehouseStock = {
-        warehouse: defaultWarehouseName,
-        openingStock: 0,
-        openingStockValue: 0,
-        stockOnHand: 0,
-        committedStock: 0,
-        availableForSale: 0,
-        physicalOpeningStock: 0,
-        physicalStockOnHand: 0,
-        physicalCommittedStock: 0,
-        physicalAvailableForSale: 0,
-      };
-      warehouseStocks.push(warehouseStock);
-    }
-    
-    const currentStockOnHand = parseFloat(warehouseStock.stockOnHand) || 0;
-    const currentAvailableForSale = parseFloat(warehouseStock.availableForSale) || 0;
-    const currentPhysicalStockOnHand = parseFloat(warehouseStock.physicalStockOnHand) || 0;
-    const currentPhysicalAvailableForSale = parseFloat(warehouseStock.physicalAvailableForSale) || 0;
-    
-    warehouseStock.warehouse = defaultWarehouseName;
-    
-    if (operation === 'add') {
-      warehouseStock.stockOnHand = currentStockOnHand + qty;
-      warehouseStock.availableForSale = currentAvailableForSale + qty;
-      warehouseStock.physicalStockOnHand = currentPhysicalStockOnHand + qty;
-      warehouseStock.physicalAvailableForSale = currentPhysicalAvailableForSale + qty;
-    } else if (operation === 'subtract') {
-      warehouseStock.stockOnHand = Math.max(0, currentStockOnHand - qty);
-      warehouseStock.availableForSale = Math.max(0, currentAvailableForSale - qty);
-      warehouseStock.physicalStockOnHand = Math.max(0, currentPhysicalStockOnHand - qty);
-      warehouseStock.physicalAvailableForSale = Math.max(0, currentPhysicalAvailableForSale - qty);
-    } else if (operation === 'adjust') {
-      warehouseStock.stockOnHand = currentStockOnHand + qty;
-      warehouseStock.availableForSale = currentAvailableForSale + qty;
-      warehouseStock.physicalStockOnHand = currentPhysicalStockOnHand + qty;
-      warehouseStock.physicalAvailableForSale = currentPhysicalAvailableForSale + qty;
-    }
-    
-    return warehouseStocks;
-  };
-  
-  // Get current stock before update
-  const oldStock = groupItem.warehouseStocks?.find(ws => matchesWarehouse(ws.warehouse, defaultWarehouseName))?.stockOnHand || 0;
-  console.log(`   📊 Current stock: ${oldStock}, adding: ${receivedQty}`);
-  
-  // Convert group to plain object, modify, then update using $set
-  // This ensures Mongoose properly saves nested changes
-  const groupPlain = group.toObject();
-  const itemPlain = groupPlain.items[itemIndex];
-  
-  // Find or create warehouse stock entry
-  if (!itemPlain.warehouseStocks) {
-    itemPlain.warehouseStocks = [];
-  }
-  
-  let wsEntry = itemPlain.warehouseStocks.find(ws => 
-    matchesWarehouse(ws.warehouse, defaultWarehouseName)
-  );
-  
-  if (!wsEntry) {
-    wsEntry = {
-      warehouse: defaultWarehouseName,
-      openingStock: 0,
-      openingStockValue: 0,
-      stockOnHand: 0,
-      committedStock: 0,
-      availableForSale: 0,
-      physicalOpeningStock: 0,
-      physicalStockOnHand: 0,
-      physicalCommittedStock: 0,
-      physicalAvailableForSale: 0,
-    };
-    itemPlain.warehouseStocks.push(wsEntry);
-  }
-  
-  // Update stock values
-  const currentStock = parseFloat(wsEntry.stockOnHand) || 0;
-  wsEntry.stockOnHand = currentStock + receivedQty;
-  wsEntry.availableForSale = (parseFloat(wsEntry.availableForSale) || 0) + receivedQty;
-  wsEntry.physicalStockOnHand = (parseFloat(wsEntry.physicalStockOnHand) || 0) + receivedQty;
-  wsEntry.physicalAvailableForSale = (parseFloat(wsEntry.physicalAvailableForSale) || 0) + receivedQty;
-  wsEntry.warehouse = defaultWarehouseName;
-  
-  console.log(`   📊 Stock update: ${currentStock} + ${receivedQty} = ${wsEntry.stockOnHand}`);
-  
-  // Update the entire items array using $set
-  // This is more reliable than trying to update nested paths
-  const updateResult = await ItemGroup.findByIdAndUpdate(
-    itemGroupId,
-    {
-      $set: {
-        [`items.${itemIndex}`]: itemPlain
-      }
-    },
-    { new: true }
-  );
-  
-  if (!updateResult) {
-    console.error(`❌ Failed to update stock using findByIdAndUpdate`);
-    return { success: false, message: "Failed to update stock" };
-  }
-  
-  console.log(`   ✅ Stock updated using findByIdAndUpdate with $set`);
-  
-  // Reload the group to get the actual saved values
-  const savedGroup = await ItemGroup.findById(itemGroupId);
-  if (!savedGroup) {
-    console.error(`❌ Failed to reload group ${itemGroupId} after save`);
-    return { success: false, message: "Failed to reload group after save" };
-  }
-  
-  // Find the item again (in case index changed, though it shouldn't)
-  const savedItemIndex = savedGroup.items.findIndex(gi => {
-    if (itemSku && gi.sku) {
-      return gi.name && gi.name.trim() === itemName.trim() && gi.sku.trim() === itemSku.trim();
-    }
-    return gi.name && gi.name.trim() === itemName.trim();
-  });
-  
-  if (savedItemIndex === -1) {
-    console.error(`❌ Item "${itemName}" not found in saved group`);
-    return { success: false, message: "Item not found in saved group" };
-  }
-  
-  const savedItem = savedGroup.items[savedItemIndex];
-  const savedStock = savedItem.warehouseStocks.find(ws => matchesWarehouse(ws.warehouse, defaultWarehouseName)) || savedItem.warehouseStocks[0];
-  
-  // Update monthly opening stock for purchase
+// Move stock for a receive line through the central stock service.
+// operation: "add" (+qty), "subtract" (-qty), "adjust" (qty is already the signed difference).
+// The old helpers ignored "subtract" and ADDED the quantity again when a receive was reverted.
+const prStockMove = async (ref, receivedQty, operation, targetWarehouse) => {
+  const wh = targetWarehouse || "Warehouse";
+  const q = parseFloat(receivedQty) || 0;
+  const delta = operation === "subtract" ? -Math.abs(q) : operation === "adjust" ? q : Math.abs(q);
+  if (!delta) return { success: true, type: "none", stock: null };
   try {
-    const itemId = savedItem._id?.toString() || savedItem.id?.toString();
-    if (itemId && operation === 'add') {
-      await updateMonthlyStockForPurchase(itemGroupId, itemId, defaultWarehouseName, receivedQty, savedItem.name);
+    const target = await resolveLine(ref);
+    if (!target) return { success: false, message: `Item "${ref.itemName || ref.itemId}" not found` };
+    await moveStock(target, wh, delta);
+    if (delta > 0 && target.kind === "group") {
+      try {
+        await updateMonthlyStockForPurchase(String(target.groupId), String(target.itemId), wh, delta, target.name);
+      } catch (e) { /* tracking only */ }
     }
-  } catch (monthlyError) {
-    console.error(`   ⚠️ Error updating monthly stock (non-critical):`, monthlyError);
+    const onHand = await getStock(target, wh);
+    return {
+      success: true,
+      type: target.kind === "group" ? "group" : "standalone",
+      stock: { warehouse: wh, stockOnHand: onHand, availableForSale: onHand },
+      itemName: target.name,
+      groupName: "",
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
   }
-  
-  console.log(`✅ Successfully updated stock for item "${groupItem.name}" in group "${group.name}": ${savedStock?.stockOnHand || 0} in "${savedStock?.warehouse || defaultWarehouseName}"`);
-  console.log(`   📊 Verification - Saved stock values:`, JSON.stringify(savedStock, null, 2));
-  
-  return { success: true, type: 'group', stock: savedStock, groupName: group.name, itemName: groupItem.name };
 };
 
-// Helper function to update Purchase Order status based on received quantities
+const updateItemStock = (itemIdValue, receivedQty, operation = "add", itemName = null, itemGroupId = null, targetWarehouse = null) =>
+  prStockMove({ itemId: itemIdValue, itemGroupId, itemName }, receivedQty, operation, targetWarehouse);
+
+const updateItemStockByName = (itemGroupId, itemName, receivedQty, operation = "add", itemSku = null, targetWarehouse = null) =>
+  prStockMove({ itemGroupId, itemName, itemSku }, receivedQty, operation, targetWarehouse);
+
 const updatePurchaseOrderStatus = async (purchaseOrderId, receiveItems) => {
   try {
     console.log(`\n📋 Updating Purchase Order status for: ${purchaseOrderId}`);
@@ -1017,7 +558,8 @@ export const createPurchaseReceive = async (req, res) => {
     console.error("Create purchase receive error:", error);
     if (error.code === 11000) {
       // Double check in case of race condition
-      const existingReceive = await PurchaseReceive.findOne({ receiveNumber: receiveData.receiveNumber });
+      // (receiveData is declared inside try — use req.body here, it used to throw a ReferenceError)
+      const existingReceive = await PurchaseReceive.findOne({ receiveNumber: req.body?.receiveNumber });
       if (existingReceive) {
         return res.status(409).json({ 
           message: "Receive number already exists",
@@ -1491,9 +1033,41 @@ export const updatePurchaseReceive = async (req, res) => {
 export const deletePurchaseReceive = async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await PurchaseReceive.findById(id).lean();
+    if (!existing) {
+      return res.status(404).json({ message: "Purchase receive not found" });
+    }
+
+    // A received receive added its quantities to stock — take them out again before deleting
+    // (deleting used to leave the pieces in stock for ever). All-or-nothing.
+    let removed = [];
+    const status = (existing.status || "").toLowerCase();
+    if (status === "received" || status === "partially_received") {
+      const lines = (existing.items || []).map((it) => ({
+        itemId: it.itemId?._id || it.itemId || null,
+        itemGroupId: it.itemGroupId,
+        itemSku: it.itemSku || it.sku,
+        itemName: it.itemName,
+        received: it.received,
+      }));
+      try {
+        removed = await applyLines(lines, existing.toWarehouse || "Warehouse", -1, { qtyField: "received" });
+      } catch (err) {
+        if (err instanceof StockError) {
+          return res.status(409).json({
+            message: `Cannot delete this receive: ${err.message}. Some of its pieces have already been sold or moved.`,
+            code: "STOCK_ERROR",
+            details: err.details,
+          });
+        }
+        throw err;
+      }
+    }
+
     const purchaseReceive = await PurchaseReceive.findByIdAndDelete(id);
-    
     if (!purchaseReceive) {
+      const { undoMovements } = await import("../utils/stockService.js");
+      await undoMovements(removed);
       return res.status(404).json({ message: "Purchase receive not found" });
     }
     

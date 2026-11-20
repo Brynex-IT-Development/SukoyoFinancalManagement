@@ -1,13 +1,15 @@
 import ItemGroup from "../model/ItemGroup.js";
 import ShoeItem from "../model/ShoeItem.js";
+import { findWarehouseIndex } from "./stockService.js";
 
 /**
- * Get current month in YYYY-MM format
+ * Get current month in YYYY-MM format, in India time (the server runs in UTC,
+ * which put sales made before 05:30 on the 1st into the previous month).
  */
 const getCurrentMonth = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  const year = ist.getUTCFullYear();
+  const month = String(ist.getUTCMonth() + 1).padStart(2, '0');
   return `${year}-${month}`;
 };
 
@@ -52,9 +54,8 @@ export const updateMonthlyStockForSale = async (itemGroupId, itemId, warehouse, 
     }
 
     // Find warehouse stock entry
-    let wsEntry = itemPlain.warehouseStocks.find(ws => 
-      ws.warehouse && ws.warehouse.toString().trim() === warehouse.toString().trim()
-    );
+    const wsIndex = findWarehouseIndex(itemPlain.warehouseStocks, warehouse);
+    let wsEntry = wsIndex === -1 ? null : itemPlain.warehouseStocks[wsIndex];
 
     if (!wsEntry) {
       console.warn(`   ❌ Warehouse "${warehouse}" not found for item`);
@@ -110,9 +111,11 @@ export const updateMonthlyStockForSale = async (itemGroupId, itemId, warehouse, 
     monthlyEntry.updatedAt = new Date();
 
     // Update the item group
+    // Write ONLY the monthly array of this warehouse row. Writing the whole item here
+    // used to overwrite stock changes made by other requests in the meantime.
     await ItemGroup.findByIdAndUpdate(
       itemGroupId,
-      { $set: { [`items.${itemIndex}`]: itemPlain } },
+      { $set: { [`items.${itemIndex}.warehouseStocks.${wsIndex}.monthlyOpeningStock`]: wsEntry.monthlyOpeningStock } },
       { new: true }
     );
 
@@ -164,9 +167,8 @@ export const updateMonthlyStockForPurchase = async (itemGroupId, itemId, warehou
     }
 
     // Find warehouse stock entry
-    let wsEntry = itemPlain.warehouseStocks.find(ws => 
-      ws.warehouse && ws.warehouse.toString().trim() === warehouse.toString().trim()
-    );
+    const wsIndex = findWarehouseIndex(itemPlain.warehouseStocks, warehouse);
+    let wsEntry = wsIndex === -1 ? null : itemPlain.warehouseStocks[wsIndex];
 
     if (!wsEntry) {
       console.warn(`   ❌ Warehouse "${warehouse}" not found for item`);
@@ -224,9 +226,11 @@ export const updateMonthlyStockForPurchase = async (itemGroupId, itemId, warehou
     monthlyEntry.updatedAt = new Date();
 
     // Update the item group
+    // Write ONLY the monthly array of this warehouse row. Writing the whole item here
+    // used to overwrite stock changes made by other requests in the meantime.
     await ItemGroup.findByIdAndUpdate(
       itemGroupId,
-      { $set: { [`items.${itemIndex}`]: itemPlain } },
+      { $set: { [`items.${itemIndex}.warehouseStocks.${wsIndex}.monthlyOpeningStock`]: wsEntry.monthlyOpeningStock } },
       { new: true }
     );
 
