@@ -7,6 +7,8 @@ import Head from "../components/Head";
 import baseUrl from "../api/api";
 import { mapLocNameToWarehouse } from "../utils/warehouseMapping";
 import useSidebar from "../hooks/useSidebar";
+import useBillRedemptions from "../hooks/useBillRedemptions";
+import RedemptionPanel from "../components/billing/RedemptionPanel";
 
 // Utility function to round to 2 decimal places without floating-point errors
 // This fixes issues like 9999.99 showing as 9999.989999 or 100.01 instead of 100.00
@@ -1688,10 +1690,27 @@ const SalesInvoiceCreate = () => {
       return;
     }
 
-    // Validate payment method is selected
-    if (!isSplitPayment && (!paymentMethod || paymentMethod.length === 0)) {
+    // Money to collect = bill total minus loyalty points / store credit applied
+    const isReturnCategory = ["return", "refund", "cancel"].includes((category || "").toLowerCase().trim());
+    const amountDue = redemption.amountDue;
+    if (customerPhone.trim() && redemption.lookup.status === "invalid") {
+      showStockAlert("The phone number is not valid. Use a 10-digit mobile number (or 6–15 digits), or leave it empty for a walk-in.", 'error');
+      return;
+    }
+
+    // Validate payment method is selected (not needed when redemptions cover the whole bill)
+    if (!isSplitPayment && (!paymentMethod || paymentMethod.length === 0) && (isReturnCategory || amountDue > 0.004)) {
       showStockAlert("Please select a payment method", 'error');
       return;
+    }
+
+    // A split payment must add up to the amount due
+    if (isSplitPayment && !isReturnCategory) {
+      const paid = ["cash", "bank", "upi", "rbl"].reduce((s, k) => s + (parseFloat(splitPaymentAmounts[k]) || 0), 0);
+      if (Math.abs(paid - amountDue) > 0.01) {
+        showStockAlert(`Split payment adds up to ₹${paid.toFixed(2)} but the amount due is ₹${amountDue.toFixed(2)}`, 'error');
+        return;
+      }
     }
 
     // Validate that all line items have required data
@@ -1828,6 +1847,9 @@ const SalesInvoiceCreate = () => {
         tdsTcsAmount: parseFloat(totals.tdsTcsAmount) || 0,
         adjustmentAmount: parseFloat(totals.adjustmentAmount) || 0,
         finalTotal: parseFloat(totals.finalTotal) || 0,
+        // Redemptions + the amount due the screen showed (server recomputes and rejects a mismatch)
+        redemptions: isReturnCategory ? [] : redemption.payload,
+        amountDue: isReturnCategory ? undefined : amountDue,
         status,
         userId: user.email || user.username || "",
         locCode: (() => {
@@ -1866,6 +1888,8 @@ const SalesInvoiceCreate = () => {
       const data = await response.json();
 
       if (!response.ok) {
+        // Balances changed since the preview (e.g. points used at another till) → refresh them
+        if (response.status === 409 || response.status === 400) redemption.refreshCustomer();
         throw new Error(data.message || "Failed to save invoice");
       }
 
@@ -2012,8 +2036,8 @@ Customer Service Available`;
     if (!whatsappWindow || whatsappWindow.closed || typeof whatsappWindow.closed === 'undefined') {
       console.warn("⚠️ Pop-up blocked! Showing fallback message.");
       
-      // Fallback: Show alert with instructions
-      alert(
+      // Fallback: Show alert with instructions (window.alert: a state variable named `alert` shadows the global here)
+      window.alert(
         `WhatsApp redirect was blocked by your browser.\n\n` +
         `Please allow pop-ups for this site, or manually open WhatsApp and send the message to:\n\n` +
         `Phone: ${formattedPhone}\n\n` +
@@ -2066,6 +2090,20 @@ Customer Service Available`;
     return null;
   };
 
+  // ── Customer & redemptions (loyalty points, store credit) — logic in hooks/useBillRedemptions.js.
+  // Redemptions apply after the existing total calculation; the server recomputes everything on save.
+  const billLocCode = useMemo(() => getLocCodeForBranch(branch) || userLocCode || "", [branch, userLocCode]); // eslint-disable-line react-hooks/exhaustive-deps
+  const redemption = useBillRedemptions({
+    phone: customerPhone,
+    finalTotal: totals.finalTotal,
+    locCode: billLocCode,
+    invoiceId: isEditMode ? id : undefined,
+  });
+  // Fill in a known customer's name when the cashier has not typed one
+  useEffect(() => {
+    if (redemption.customer && !customer.trim()) setCustomer(redemption.customer.name);
+  }, [redemption.customer]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Get user location code from localStorage (for default store creation)
   useEffect(() => {
     try {
@@ -2094,6 +2132,7 @@ Customer Service Available`;
           // Populate form fields with invoice data
           setCustomer(invoiceData.customer || "");
           setCustomerPhone(invoiceData.customerPhone || "");
+          redemption.loadSaved(invoiceData.redemptions, invoiceData.customerId);
           setBranch(invoiceData.branch || "Warehouse");
           setInvoiceNumber(invoiceData.invoiceNumber || "");
           setInvoiceDate(invoiceData.invoiceDate ? new Date(invoiceData.invoiceDate).toISOString().slice(0, 10) : "");
@@ -3785,6 +3824,9 @@ Customer Service Available`;
                   </div>
                 )}
               </div>
+
+              {/* CUSTOMER & REDEMPTIONS (loyalty points, store credit) */}
+              <RedemptionPanel r={redemption} finalTotal={totals.finalTotal} disabled={isSaving} />
             </div>
 
             {/* BOTTOM SECTION: Total and Save Button pinned to bottom */}
@@ -3792,8 +3834,20 @@ Customer Service Available`;
               {/* Total */}
               <div className="flex items-center justify-between">
                 <span className="text-sm font-bold text-[#111827]">Total</span>
-                <span className="text-xl font-bold text-[#16A34A]">₹ {totals.finalTotal}</span>
+                <span className={`font-bold ${redemption.totalRedeemed > 0 ? "text-sm text-[#111827]" : "text-xl text-[#16A34A]"}`}>₹ {totals.finalTotal}</span>
               </div>
+              {redemption.totalRedeemed > 0 && (
+                <>
+                  <div className="flex items-center justify-between -mt-2">
+                    <span className="text-xs font-semibold text-[#6B7280]">Redeemed</span>
+                    <span className="text-xs font-semibold text-red-600">− ₹ {redemption.totalRedeemed.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-[#111827]">Amount Due</span>
+                    <span className="text-xl font-bold text-[#16A34A]">₹ {redemption.amountDue.toFixed(2)}</span>
+                  </div>
+                </>
+              )}
 
               {/* Save Button */}
               <button
