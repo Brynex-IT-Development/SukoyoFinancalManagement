@@ -267,14 +267,20 @@ const Nav = () => {
     ];
     const salesLinks = [
         { to: "/sales/invoices", label: "Invoices", Icon: FileTextIcon },
-        { to: "/sales/returns", label: "Invoice Return", Icon: RotateCcw }
+        { to: "/sales/returns", label: "Invoice Return", Icon: RotateCcw },
+        { to: "/sales/customers", label: "Customers", Icon: Users },
+        { to: "/sales/credit-notes", label: "Store Credit", Icon: ReceiptText },
+        ...(currentuser?.power === 'admin' || currentuser?.role === 'admin' || currentuser?.role === 'superadmin'
+            ? [{ to: "/sales/loyalty-settings", label: "Loyalty Settings", Icon: SlidersHorizontal }]
+            : []),
     ];
     const isInventoryActive = inventoryLinks.some((link) => link.to === activePath) ||
         activePath.startsWith("/shoe-sales/items") ||
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/item-groups")) ||
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/inactive")) ||
         activePath.startsWith("/inventory/store-orders");
-    const isSalesActive = salesLinks.some((link) => link.to === activePath);
+    const isSalesActive = salesLinks.some((link) => link.to === activePath) ||
+        activePath.startsWith("/sales/customers") || activePath.startsWith("/sales/credit-notes");
     const purchaseLinks = [
         { to: "/purchase/orders", label: "Purchase Orders", Icon: ClipboardList },
         { to: "/purchase/receives", label: "Purchase Receives", Icon: PackageCheck },
