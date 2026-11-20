@@ -44,6 +44,9 @@ const SalesInvoiceDetail = () => {
   const [returnReason, setReturnReason] = useState("");
   const [returnPaymentMethod, setReturnPaymentMethod] = useState("Cash");
   const [returningInvoice, setReturningInvoice] = useState(false);
+  // Refund as cash (current behaviour) or as store credit; preview of the split comes from the server
+  const [refundMode, setRefundMode] = useState("cash");
+  const [refundPreview, setRefundPreview] = useState(null);
 
   // Get current user info
   const currentUser = JSON.parse(localStorage.getItem("rootfinuser") || "{}");
@@ -309,6 +312,28 @@ const SalesInvoiceDetail = () => {
     fetchStoreInfo();
   }, [invoice, API_URL]);
 
+  // Ask the server how the selected return would be refunded (cash / store credit / points)
+  useEffect(() => {
+    if (!showReturnModal || !invoice?._id) return;
+    const value = calculateTotalReturnAmountWithTax();
+    if (!(value > 0)) { setRefundPreview(null); return; }
+    let active = true;
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/sales/invoices/${invoice._id}/return-preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ returnValue: value, refundMode }),
+        });
+        const data = await res.json();
+        if (active) setRefundPreview(res.ok ? data : null);
+      } catch {
+        if (active) setRefundPreview(null);
+      }
+    }, 300);
+    return () => { active = false; clearTimeout(t); };
+  }, [showReturnModal, returnItems, refundMode, invoice?._id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handlePrint = () => {
     window.print();
   };
@@ -381,6 +406,8 @@ const SalesInvoiceDetail = () => {
       
       setReturnItems(itemsWithFreshData);
       setReturnReason("");
+      setRefundMode("cash");
+      setRefundPreview(null);
       setShowReturnModal(true);
     } catch (error) {
       console.error("Error opening return modal:", error);
@@ -498,6 +525,8 @@ const SalesInvoiceDetail = () => {
         originalInvoiceNumber: invoice.invoiceNumber,
         notes: `Return for Invoice ${invoice.invoiceNumber}. Reason: ${returnReason}`,
         paymentMethod: returnPaymentMethod,
+        refundMode,
+        locCode: invoice.locCode,
         lineItems: itemsToReturn.map((item) => ({
           item: item.item,
           quantity: item.returnQuantity,
@@ -585,8 +614,15 @@ const SalesInvoiceDetail = () => {
         });
       }
 
+      const rb = result.refundBreakdown || {};
       alert(
         `Return invoice created: ${result.invoiceNumber}\n\n` +
+        (rb.cashRefund > 0 ? `Refund to pay out (${returnPaymentMethod}): ₹${rb.cashRefund.toFixed(2)}\n` : "") +
+        (rb.storeCreditNumber ? `Store credit issued: ${rb.storeCreditNumber} for ₹${rb.storeCreditAmount.toFixed(2)}\n` : "") +
+        (rb.nonRefundable > 0 ? `Not refundable (paid with points/vouchers): ₹${rb.nonRefundable.toFixed(2)}\n` : "") +
+        (rb.pointsRestored ? `Loyalty points given back: ${rb.pointsRestored}\n` : "") +
+        (rb.pointsReversed ? `Loyalty points taken back: ${rb.pointsReversed}\n` : "") +
+        "\n" +
         (updatedLineItems.length > 0 
           ? `Original invoice ${invoice.invoiceNumber} has been updated with remaining quantities.\n`
           : `All items have been returned.\n`) +
@@ -1273,10 +1309,61 @@ const SalesInvoiceDetail = () => {
                       <span>{formatCurrency(displayFinalTotal)}</span>
                     </div>
 
+                    {/* Redemptions (loyalty points / store credit) applied after the total */}
+                    {(invoice.redemptions || []).map((r, idx) => (
+                      <div key={idx} className="flex justify-between text-xs py-1 text-red-600">
+                        <span className="font-medium">
+                          {r.type === "loyalty" ? `Loyalty points (${r.points} pts)` : r.type === "storeCredit" ? `Store credit ${r.code}` : `${r.type} ${r.code || ""}`}
+                        </span>
+                        <span className="font-bold">(-) {formatCurrency(r.amount)}</span>
+                      </div>
+                    ))}
+
+                    {/* Return invoice: how the refund was paid out */}
+                    {invoice.refundBreakdown?.returnValue > 0 && (
+                      <div className="text-xs space-y-1 pt-1">
+                        {invoice.refundBreakdown.cashRefund > 0 && (
+                          <div className="flex justify-between"><span className="text-[#6B7280]">Refunded ({invoice.paymentMethod || "cash"})</span><span className="font-semibold">{formatCurrency(invoice.refundBreakdown.cashRefund)}</span></div>
+                        )}
+                        {invoice.refundBreakdown.storeCreditAmount > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-[#6B7280]">As store credit {invoice.refundBreakdown.storeCreditNumber && (
+                              <Link to={`/sales/credit-notes/${invoice.refundBreakdown.storeCreditId}`} className="font-semibold text-[#1C1F26] hover:underline">{invoice.refundBreakdown.storeCreditNumber}</Link>
+                            )}</span>
+                            <span className="font-semibold">{formatCurrency(invoice.refundBreakdown.storeCreditAmount)}</span>
+                          </div>
+                        )}
+                        {invoice.refundBreakdown.nonRefundable > 0 && (
+                          <div className="flex justify-between"><span className="text-[#6B7280]">Not refundable (paid with points)</span><span className="font-semibold">{formatCurrency(invoice.refundBreakdown.nonRefundable)}</span></div>
+                        )}
+                        {(invoice.refundBreakdown.pointsRestored > 0 || invoice.refundBreakdown.pointsReversed > 0) && (
+                          <div className="flex justify-between"><span className="text-[#6B7280]">Loyalty points</span><span className="font-semibold">+{invoice.refundBreakdown.pointsRestored || 0} back / −{invoice.refundBreakdown.pointsReversed || 0} earned</span></div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="bg-[#F6FCE6] border border-[#ECF9C7] p-3.5 mt-3 flex justify-between items-center">
-                      <span className="text-xs font-bold uppercase tracking-wider text-[#15171D]">Balance Due</span>
-                      <span className="text-lg font-black text-[#15171D]">{formatCurrency(displayFinalTotal)}</span>
+                      <span className="text-xs font-bold uppercase tracking-wider text-[#15171D]">
+                        {invoice.refundBreakdown?.returnValue > 0 ? "Refund Paid Out" : (invoice.totalRedeemed > 0 ? "Amount Due" : "Balance Due")}
+                      </span>
+                      <span className="text-lg font-black text-[#15171D]">
+                        {formatCurrency(invoice.amountDue !== undefined && invoice.amountDue !== null
+                          ? Math.abs(invoice.amountDue)
+                          : displayFinalTotal)}
+                      </span>
                     </div>
+
+                    {/* Customer & loyalty for this bill */}
+                    {(invoice.customerId || invoice.loyaltyPointsEarned > 0) && (
+                      <div className="flex justify-between text-[11px] text-[#6B7280] pt-1">
+                        {invoice.customerId ? (
+                          <Link to={`/sales/customers/${invoice.customerId}`} className="hover:underline print:no-underline">Customer profile</Link>
+                        ) : <span />}
+                        {(invoice.loyaltyPointsEarned > 0 || invoice.loyaltyPointsUsed > 0) && (
+                          <span>Points earned: {invoice.loyaltyPointsEarned || 0}{invoice.loyaltyPointsUsed ? ` · used: ${invoice.loyaltyPointsUsed}` : ""}</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -1370,6 +1457,44 @@ const SalesInvoiceDetail = () => {
                   <p className="text-[11px] text-[#6B7280] mt-1.5">
                     Select how the refund amount will be returned to the customer
                   </p>
+                </div>
+
+                {/* Refund as cash or as store credit */}
+                <div>
+                  <label className="block text-xs uppercase font-bold text-[#4B5563] tracking-wider mb-2">
+                    Refund As
+                  </label>
+                  <div className="flex gap-6">
+                    {[["cash", "Cash / bank refund"], ["storeCredit", "Store credit"]].map(([value, label]) => (
+                      <label key={value} className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-[#111827]">
+                        <input
+                          type="radio"
+                          name="refundMode"
+                          value={value}
+                          checked={refundMode === value}
+                          onChange={() => setRefundMode(value)}
+                          className="w-4 h-4 accent-[#1C1F26]"
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {refundMode === "storeCredit" && !invoice.customerId && !invoice.customerPhone && (
+                    <p className="text-[11px] font-semibold text-red-600 mt-1.5">Store credit needs a customer phone number, and this invoice has none.</p>
+                  )}
+                  {refundPreview && (
+                    <div className="mt-2 text-[11px] bg-[#F9FAFB] border border-[#E5E7EB] p-2.5 space-y-0.5">
+                      {refundPreview.cashRefund > 0 && <div className="flex justify-between"><span>Pay out ({returnPaymentMethod})</span><b>₹{refundPreview.cashRefund.toFixed(2)}</b></div>}
+                      {refundPreview.storeCreditAmount > 0 && <div className="flex justify-between"><span>Issue as store credit</span><b>₹{refundPreview.storeCreditAmount.toFixed(2)}</b></div>}
+                      {refundPreview.nonRefundable > 0 && <div className="flex justify-between text-[#92400E]"><span>Not refundable (paid with points)</span><b>₹{refundPreview.nonRefundable.toFixed(2)}</b></div>}
+                      {(refundPreview.pointsRestore > 0 || refundPreview.pointsReverse > 0) && (
+                        <div className="flex justify-between"><span>Loyalty points</span><b>+{refundPreview.pointsRestore} back / −{refundPreview.pointsReverse} earned</b></div>
+                      )}
+                      {refundMode === "cash" && refundPreview.storeCreditAmount > 0 && (
+                        <p className="text-[#6B7280] pt-1">The part paid with store credit comes back as store credit, not cash.</p>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Items to Return */}
