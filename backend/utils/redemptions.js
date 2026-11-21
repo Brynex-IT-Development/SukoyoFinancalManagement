@@ -12,12 +12,14 @@ import StoreCredit from "../model/StoreCredit.js";
 import Setting from "../model/Setting.js";
 import ShoeItem from "../model/ShoeItem.js";
 import ItemGroup from "../model/ItemGroup.js";
+import GiftCard from "../model/GiftCard.js";
+import Voucher from "../model/Voucher.js";
 import { resolveLine } from "./stockService.js";
 import { nextNumber } from "./nextNumber.js";
-import { istDayEnd, addIstDays } from "./ist.js";
+import { istDayStart, istDayEnd, addIstDays } from "./ist.js";
 import {
   round2, normalizePhone, DEFAULT_LOYALTY_SETTINGS, maxRedeemable, amountToPoints, pointsToAmount,
-  earnBaseOf, pointsEarned, redeemedOfType, returnRefundSplit,
+  earnBaseOf, pointsEarned, redeemedOfType, returnRefundSplit, voucherEligibleTotal, voucherUsableAmount, cleanCode,
 } from "./retailMath.js";
 
 export class HttpError extends Error {
@@ -212,24 +214,206 @@ const retakeStoreCredit = async ({ creditId, invoiceId, amount }) => {
   else if (r && r.status === "used") await StoreCredit.updateOne({ _id: r._id }, { $set: { status: "open" } });
 };
 
+// ─── Gift cards (F4) ────────────────────────────────────────────────────────
+
+/** Mark active cards past their expiry as expired (checked on read; no cron needed). */
+export const expireStaleGiftCards = async () => {
+  const r = await GiftCard.updateMany({ status: "active", expiryDate: { $ne: null, $lt: new Date() } }, { $set: { status: "expired" } });
+  return r.modifiedCount || 0;
+};
+
+export const findGiftCard = async ({ refId, code }) =>
+  toId(refId) ? GiftCard.findById(toId(refId)).lean() : code ? GiftCard.findOne({ code: cleanCode(code) }).lean() : null;
+
+/** Why a card cannot be spent right now, or null when it can. `extra` = balance this invoice already used (edit). */
+export const giftCardProblem = (card, extra = 0) => {
+  if (!card) return "Gift card not found.";
+  if (card.status === "blocked") return `Gift card ${card.code} is blocked.`;
+  if (card.status === "expired" || (card.expiryDate && new Date(card.expiryDate) < new Date())) return `Gift card ${card.code} has expired.`;
+  if (round2((card.balance || 0) + extra) <= 0) return `Gift card ${card.code} has no balance left.`;
+  return null;
+};
+
+const useGiftCard = async ({ cardId, amount, invoiceId, invoiceNumber, by }) => {
+  const now = new Date();
+  const r = await GiftCard.findOneAndUpdate(
+    { _id: toId(cardId), status: "active", balance: { $gte: amount - EPS }, ...unexpired(now) },
+    { $inc: { balance: -amount }, $push: { history: { type: "redeem", amount, invoiceId: toId(invoiceId), invoiceNumber, date: now, by } } },
+    { new: true }
+  ).lean();
+  if (!r) {
+    const card = await GiftCard.findById(toId(cardId)).lean();
+    throw new HttpError(409, giftCardProblem(card) || `Gift card ${card?.code} has only ₹${round2(card?.balance)} left.`);
+  }
+  const bal = round2(r.balance);
+  if (bal !== r.balance) await GiftCard.updateOne({ _id: r._id }, { $set: { balance: Math.max(0, bal) } });
+};
+
+/** Undo a use made in this same request: put the money back and drop the redeem entry. */
+const rollbackGiftCard = ({ cardId, amount, invoiceId }) => GiftCard.updateOne(
+  { _id: toId(cardId), history: { $elemMatch: { type: "redeem", invoiceId: toId(invoiceId), reversed: { $ne: true } } } },
+  { $inc: { balance: amount }, $pull: { history: { type: "redeem", invoiceId: toId(invoiceId), reversed: { $ne: true } } } }
+);
+
+/** Invoice edited/deleted: put the amount back and log a "reverse" entry. */
+const giveBackGiftCard = async ({ cardId, amount, invoiceId, invoiceNumber, by }) => {
+  const r = await GiftCard.updateOne(
+    { _id: toId(cardId), history: { $elemMatch: { type: "redeem", invoiceId: toId(invoiceId), reversed: { $ne: true } } } },
+    { $inc: { balance: amount }, $set: { "history.$.reversed": true } }
+  );
+  if (!r.modifiedCount) return false;
+  // Separate update: Mongo cannot $set a history element and $push to history in one go
+  await GiftCard.updateOne({ _id: toId(cardId) }, { $push: { history: { type: "reverse", amount, invoiceId: toId(invoiceId), invoiceNumber, by, note: "Invoice edited or deleted" } } });
+  return true;
+};
+
+/** Undo giveBackGiftCard (rollback only). */
+const retakeGiftCard = async ({ cardId, amount, invoiceId }) => {
+  const r = await GiftCard.updateOne(
+    { _id: toId(cardId), balance: { $gte: amount - EPS }, history: { $elemMatch: { type: "redeem", invoiceId: toId(invoiceId), reversed: true } } },
+    { $inc: { balance: -amount }, $set: { "history.$.reversed": false } }
+  );
+  if (r.modifiedCount) await GiftCard.updateOne({ _id: toId(cardId) }, { $pull: { history: { type: "reverse", invoiceId: toId(invoiceId) } } });
+};
+
+// ─── Vouchers (F5) ──────────────────────────────────────────────────────────
+
+/**
+ * Turn invoice lines into what voucher scopes match on, read from the database (never
+ * from client-sent itemData): [{ amount, itemIds, brand, categories, subCategory }].
+ */
+export const voucherLinesFrom = async (lines) => {
+  const out = [];
+  const cache = new Map();
+  for (const line of lines || []) {
+    const amount = Number(line?.amount) || (Number(line?.quantity) || 0) * (Number(line?.rate) || 0);
+    let attrs = { itemIds: [], brand: "", categories: [], subCategory: "" };
+    try {
+      const target = await resolveLine(line);
+      if (target) {
+        const key = target.key;
+        if (!cache.has(key)) {
+          if (target.kind === "group") {
+            const g = await ItemGroup.findById(target.groupId).select("brand category").lean();
+            cache.set(key, { itemIds: [String(target.itemId), String(target.groupId)], brand: g?.brand || "", categories: [g?.category].filter(Boolean), subCategory: "" });
+          } else {
+            const it = await ShoeItem.findById(target.itemId).select("brand category itemCategory subCategory").lean();
+            cache.set(key, { itemIds: [String(target.itemId)], brand: it?.brand || "", categories: [it?.category, it?.itemCategory].filter(Boolean), subCategory: it?.subCategory || "" });
+          }
+        }
+        attrs = cache.get(key);
+      }
+    } catch { /* free-text or unknown line: matches only an open scope */ }
+    out.push({ amount, ...attrs });
+  }
+  return out;
+};
+
+export const findVoucher = async ({ refId, code }) =>
+  toId(refId) ? Voucher.findById(toId(refId)).lean() : code ? Voucher.findOne({ code: cleanCode(code) }).lean() : null;
+
+/**
+ * Check a voucher against a bill and work out its amount. Throws HttpError(400) with the reason.
+ * `usedHere` (edit preview only) = this invoice's own earlier use of the voucher, counted as available.
+ */
+export const evaluateVoucher = ({ voucher: v, customer, finalTotal, voucherLines, locCode, usedHere = null }) => {
+  if (!v) throw new HttpError(400, "Voucher not found.");
+  const now = new Date();
+  if (!v.active) throw new HttpError(400, `Voucher ${v.code} is switched off.`);
+  if (v.validFrom && now < istDayStart(v.validFrom)) throw new HttpError(400, `Voucher ${v.code} can be used from ${new Date(v.validFrom).toLocaleDateString("en-IN")}.`);
+  if (v.validTo && now > istDayEnd(v.validTo)) throw new HttpError(400, `Voucher ${v.code} expired on ${new Date(v.validTo).toLocaleDateString("en-IN")}.`);
+  if (v.locCode && String(v.locCode) !== String(locCode || "")) throw new HttpError(400, `Voucher ${v.code} can only be used at store ${v.locCode}.`);
+  if (v.customerId) {
+    if (!customer) throw new HttpError(400, `Voucher ${v.code} belongs to a customer. Enter their phone number.`);
+    if (String(v.customerId) !== String(customer._id)) throw new HttpError(400, `Voucher ${v.code} belongs to another customer.`);
+  }
+  const active = (v.usages || []).filter((u) => !u.reversed);
+  const hereCount = usedHere ? 1 : 0;
+  if (v.usageLimitTotal > 0 && (v.usedCount || 0) - hereCount >= v.usageLimitTotal) throw new HttpError(400, `Voucher ${v.code} has been used the maximum ${v.usageLimitTotal} times.`);
+  if (v.usageLimitPerCustomer > 0) {
+    if (!customer) throw new HttpError(400, `Voucher ${v.code} is limited per customer. Enter the customer's phone number.`);
+    const mine = active.filter((u) => String(u.customerId) === String(customer._id)).length - hereCount;
+    if (mine >= v.usageLimitPerCustomer) throw new HttpError(400, `This customer has already used voucher ${v.code} ${mine} time(s) (limit ${v.usageLimitPerCustomer}).`);
+  }
+  const eligibleTotal = voucherEligibleTotal(voucherLines, v.scope || {});
+  const res = voucherUsableAmount({ voucher: { ...v, balance: round2((v.balance || 0) + (usedHere && v.kind === "value" ? usedHere.amount : 0)) }, eligibleTotal, finalTotal });
+  if (!res.allowed) throw new HttpError(400, `${v.code}: ${res.reason}.`);
+  return { amount: res.amount, eligibleTotal };
+};
+
+const useVoucher = async ({ voucher: v, amount, customer, invoiceId, invoiceNumber }) => {
+  const cid = customer?._id ? toId(customer._id) : null;
+  const exprs = [
+    // total limit (unset/0 = unlimited)
+    { $or: [{ $not: [{ $gt: [{ $ifNull: ["$usageLimitTotal", 0] }, 0] }] }, { $lt: ["$usedCount", "$usageLimitTotal"] }] },
+  ];
+  if (cid) {
+    exprs.push({ $or: [
+      { $not: [{ $gt: [{ $ifNull: ["$usageLimitPerCustomer", 0] }, 0] }] },
+      { $lt: [{ $size: { $filter: { input: { $ifNull: ["$usages", []] }, cond: { $and: [{ $eq: ["$$this.customerId", cid] }, { $ne: ["$$this.reversed", true] }] } } } }, "$usageLimitPerCustomer"] },
+    ] });
+  }
+  const filter = { _id: toId(v._id), active: true, $expr: { $and: exprs } };
+  const inc = { usedCount: 1 };
+  if (v.kind === "value") { filter.balance = { $gte: amount - EPS }; inc.balance = -amount; }
+  const r = await Voucher.findOneAndUpdate(filter, { $inc: inc, $push: { usages: { invoiceId: toId(invoiceId), invoiceNumber, customerId: cid, amount, date: new Date() } } }, { new: true }).lean();
+  if (!r) throw new HttpError(409, `Voucher ${v.code} can no longer be used (limit reached, balance used or switched off). Please re-check.`);
+  if (v.kind === "value" && round2(r.balance) !== r.balance) await Voucher.updateOne({ _id: r._id }, { $set: { balance: Math.max(0, round2(r.balance)) } });
+};
+
+const rollbackVoucher = ({ voucherId, kind, amount, invoiceId }) => Voucher.updateOne(
+  { _id: toId(voucherId), usages: { $elemMatch: { invoiceId: toId(invoiceId), reversed: { $ne: true } } } },
+  { $inc: { usedCount: -1, ...(kind === "value" ? { balance: amount } : {}) }, $pull: { usages: { invoiceId: toId(invoiceId), reversed: { $ne: true } } } }
+);
+
+const giveBackVoucher = async ({ voucherId, invoiceId }) => {
+  const v = await Voucher.findOne({ _id: toId(voucherId), usages: { $elemMatch: { invoiceId: toId(invoiceId), reversed: { $ne: true } } } }).select("kind usages").lean();
+  const use = v?.usages?.find((u) => String(u.invoiceId) === String(invoiceId) && !u.reversed);
+  if (!use) return null;
+  const r = await Voucher.updateOne(
+    { _id: v._id, usages: { $elemMatch: { _id: use._id, reversed: { $ne: true } } } },
+    { $inc: { usedCount: -1, ...(v.kind === "value" ? { balance: use.amount } : {}) }, $set: { "usages.$.reversed": true, "usages.$.reversedAt": new Date() } }
+  );
+  return r.modifiedCount ? { kind: v.kind, amount: use.amount, usageId: use._id } : null;
+};
+
+const retakeVoucher = ({ voucherId, gave }) => Voucher.updateOne(
+  { _id: toId(voucherId), usages: { $elemMatch: { _id: gave.usageId, reversed: true } } },
+  { $inc: { usedCount: 1, ...(gave.kind === "value" ? { balance: -gave.amount } : {}) }, $set: { "usages.$.reversed": false, "usages.$.reversedAt": null } }
+);
+
 // ─── Planning ───────────────────────────────────────────────────────────────
 
 /**
  * Validate the redemptions the client asked for and compute the server's own figures.
  * The client's numbers are only a preview: points/amounts are recomputed here.
  * Throws HttpError(400) with a clear message for anything invalid.
+ *
+ * Loyalty and store credit need a customer. Gift cards are bearer cards (no customer needed).
+ * A voucher needs a customer only when it is tied to one or limited per customer.
+ *
+ * NOTE (accounting): vouchers — including "discount" vouchers — are applied here as redemptions
+ * on the final total, so they do not reduce the taxable value. If the accountant later wants
+ * discount vouchers to reduce the taxable value instead, that change belongs in the invoice's
+ * tax calculation (SalesInvoiceCreate.jsx calculateTotals), not here.
  */
-export const planRedemptions = async ({ requested, finalTotal, customer, settings }) => {
+export const planRedemptions = async ({ requested, finalTotal, customer, settings, lines = [], locCode = "" }) => {
   const list = (Array.isArray(requested) ? requested : []).filter((r) => r && r.type);
   const empty = { redemptions: [], totalRedeemed: 0, loyaltyPointsUsed: 0, loyaltyAmount: 0 };
   if (!list.length) return empty;
+  const unknown = list.find((r) => !["loyalty", "storeCredit", "giftCard", "voucher"].includes(r.type));
+  if (unknown) throw new HttpError(400, `Unknown redemption type "${unknown.type}".`);
   const total = round2(Number(finalTotal) || 0);
-  if (!customer) throw new HttpError(400, "Enter the customer's phone number to use loyalty points or store credit.");
   if (total <= 0) throw new HttpError(400, "Redemptions can only be used on a bill with a positive total.");
+  if (!customer && list.some((r) => r.type === "loyalty" || r.type === "storeCredit")) {
+    throw new HttpError(400, "Enter the customer's phone number to use loyalty points or store credit.");
+  }
+  const asked = (r) => (r.amount !== undefined && r.amount !== null && r.amount !== "" ? round2(Number(r.amount)) : null);
 
   const out = [];
   let loyaltyPointsUsed = 0, loyaltyAmount = 0;
 
+  // Loyalty points (F2)
   const loyalty = list.filter((r) => r.type === "loyalty");
   if (loyalty.length > 1) throw new HttpError(400, "Loyalty points can only be applied once per bill.");
   if (loyalty.length) {
@@ -250,9 +434,10 @@ export const planRedemptions = async ({ requested, finalTotal, customer, setting
     out.push({ type: "loyalty", refId: null, code: "", points: pts, amount: loyaltyAmount });
   }
 
+  // Store credit (F3)
   const byCredit = new Map();
   for (const r of list.filter((x) => x.type === "storeCredit")) {
-    const amount = round2(Number(r.amount) || 0);
+    const amount = asked(r) || 0;
     if (!(amount > 0)) throw new HttpError(400, "Enter the store credit amount to use.");
     const sc = r.refId && toId(r.refId)
       ? await StoreCredit.findById(toId(r.refId)).lean()
@@ -269,11 +454,32 @@ export const planRedemptions = async ({ requested, finalTotal, customer, setting
   }
   out.push(...byCredit.values());
 
-  if (list.some((r) => r.type === "giftCard" || r.type === "voucher")) {
-    throw new HttpError(400, "Gift cards and vouchers are not available yet.");
+  // Gift cards (F4): several cards per bill, part use allowed
+  const byCard = new Map();
+  for (const r of list.filter((x) => x.type === "giftCard")) {
+    const amount = asked(r) || 0;
+    if (!(amount > 0)) throw new HttpError(400, "Enter the gift card amount to use.");
+    const card = await findGiftCard(r);
+    const problem = giftCardProblem(card);
+    if (problem) throw new HttpError(400, problem);
+    const key = String(card._id);
+    const want = round2((byCard.get(key)?.amount || 0) + amount);
+    if (want > round2(card.balance) + EPS) throw new HttpError(400, `Gift card ${card.code} has only ₹${round2(card.balance)} left.`);
+    byCard.set(key, { type: "giftCard", refId: card._id, code: card.code, points: 0, amount: want });
   }
-  const unknown = list.find((r) => !["loyalty", "storeCredit", "giftCard", "voucher"].includes(r.type));
-  if (unknown) throw new HttpError(400, `Unknown redemption type "${unknown.type}".`);
+  out.push(...byCard.values());
+
+  // Voucher (F5): one per bill
+  const vouchers = list.filter((x) => x.type === "voucher");
+  if (vouchers.length > 1) throw new HttpError(400, "Only one voucher can be used per bill.");
+  if (vouchers.length) {
+    const r = vouchers[0];
+    const v = await findVoucher(r);
+    const { amount: worth } = evaluateVoucher({ voucher: v, customer, finalTotal: total, voucherLines: await voucherLinesFrom(lines), locCode });
+    const want = asked(r);
+    const amount = want !== null && want > 0 ? Math.min(want, worth) : worth; // may take less than the full value
+    out.push({ type: "voucher", refId: v._id, code: v.code, points: 0, amount: round2(amount), kind: v.kind });
+  }
 
   const totalRedeemed = round2(out.reduce((s, r) => s + r.amount, 0));
   if (totalRedeemed > total + EPS) throw new HttpError(400, `Redemptions (₹${totalRedeemed}) cannot be more than the bill total (₹${total}).`);
@@ -282,7 +488,7 @@ export const planRedemptions = async ({ requested, finalTotal, customer, setting
 
 // ─── Applying / reversing on an invoice ─────────────────────────────────────
 
-/** Take the planned redemptions off the customer's balances. Pushes undo steps onto `undo`. */
+/** Take the planned redemptions off the balances. Pushes undo steps onto `undo`. */
 export const applyRedemptions = async ({ plan, customer, invoiceId, invoiceNumber, createdBy, undo }) => {
   for (const r of plan.redemptions) {
     if (r.type === "loyalty") {
@@ -296,9 +502,17 @@ export const applyRedemptions = async ({ plan, customer, invoiceId, invoiceNumbe
         await StoreCredit.updateOne({ _id: r.refId }, { $pull: { redemptions: { invoiceId: toId(invoiceId), reversed: true } } });
         await refreshStoreCreditBalance(customer._id);
       });
+    } else if (r.type === "giftCard") {
+      await useGiftCard({ cardId: r.refId, amount: r.amount, invoiceId, invoiceNumber, by: createdBy });
+      undo.push(`gift card ${r.code}`, () => rollbackGiftCard({ cardId: r.refId, amount: r.amount, invoiceId }));
+    } else if (r.type === "voucher") {
+      const v = await Voucher.findById(r.refId).lean();
+      if (!v) throw new HttpError(409, `Voucher ${r.code} no longer exists.`);
+      await useVoucher({ voucher: v, amount: r.amount, customer, invoiceId, invoiceNumber });
+      undo.push(`voucher ${r.code}`, () => rollbackVoucher({ voucherId: r.refId, kind: v.kind, amount: r.amount, invoiceId }));
     }
   }
-  if (plan.redemptions.some((r) => r.type === "storeCredit")) await refreshStoreCreditBalance(customer._id);
+  if (customer && plan.redemptions.some((r) => r.type === "storeCredit")) await refreshStoreCreditBalance(customer._id);
 };
 
 /** Points a sale earns (pure, computed before the invoice is saved). */
@@ -316,38 +530,50 @@ export const postEarn = async ({ customer, earned, earnBase, invoiceId, invoiceN
 
 /**
  * Reverse everything a sale invoice applied (used before an edit re-applies, and on delete):
- * gives back loyalty points and store credit used, takes back points earned
- * (net of what returns already took back). Pushes undo steps that re-apply it.
+ * gives back loyalty points, store credit, gift card balance and voucher use, and takes back
+ * points earned (net of what returns already took back). Pushes undo steps that re-apply it.
+ * Works for walk-in invoices too (gift cards and vouchers need no customer).
  */
-export const reverseInvoiceLoyalty = async ({ invoice, createdBy, reason, undo }) => {
-  if (!invoice?.loyaltyApplied || !invoice.customerId) return;
+export const reverseInvoiceRedemptions = async ({ invoice, createdBy, reason, undo }) => {
+  if (!invoice?.loyaltyApplied) return;
   const customerId = invoice.customerId;
   const invoiceId = invoice._id;
   const invoiceNumber = invoice.invoiceNumber;
   const note = reason || "Invoice changed";
 
-  const earnedLeft = (invoice.loyaltyPointsEarned || 0) - (invoice.loyaltyPointsReversed || 0);
-  if (earnedLeft > 0) {
-    const res = await changePoints({ customerId, delta: -earnedLeft, type: "reverse_earn", invoiceId, invoiceNumber, createdBy, note, clamp: true });
-    undo.push("re-earn", () => rollbackPoints(customerId, res));
+  if (customerId) {
+    const earnedLeft = (invoice.loyaltyPointsEarned || 0) - (invoice.loyaltyPointsReversed || 0);
+    if (earnedLeft > 0) {
+      const res = await changePoints({ customerId, delta: -earnedLeft, type: "reverse_earn", invoiceId, invoiceNumber, createdBy, note, clamp: true });
+      undo.push("re-earn", () => rollbackPoints(customerId, res));
+    }
   }
   for (const r of invoice.redemptions || []) {
-    if (r.type === "loyalty") {
+    if (r.type === "loyalty" && customerId) {
       const back = (r.points || 0) - (invoice.loyaltyPointsRestored || 0);
       if (back > 0) {
         const res = await changePoints({ customerId, delta: back, type: "restore_redeem", invoiceId, invoiceNumber, createdBy, note });
         undo.push("re-redeem", () => rollbackPoints(customerId, res));
       }
-    } else if (r.type === "storeCredit") {
+    } else if (r.type === "storeCredit" && customerId) {
       const gave = await giveBackStoreCredit({ creditId: r.refId, invoiceId, amount: r.amount });
       if (gave) undo.push(`re-take ${r.code}`, async () => {
         await retakeStoreCredit({ creditId: r.refId, invoiceId, amount: r.amount });
         await refreshStoreCreditBalance(customerId);
       });
+    } else if (r.type === "giftCard") {
+      const gave = await giveBackGiftCard({ cardId: r.refId, amount: r.amount, invoiceId, invoiceNumber, by: createdBy });
+      if (gave) undo.push(`re-take ${r.code}`, () => retakeGiftCard({ cardId: r.refId, amount: r.amount, invoiceId }));
+    } else if (r.type === "voucher") {
+      const gave = await giveBackVoucher({ voucherId: r.refId, invoiceId });
+      if (gave) undo.push(`re-use ${r.code}`, () => retakeVoucher({ voucherId: r.refId, gave }));
     }
   }
-  await refreshStoreCreditBalance(customerId);
+  if (customerId) await refreshStoreCreditBalance(customerId);
 };
+
+/** @deprecated old name kept for callers; same function. */
+export const reverseInvoiceLoyalty = reverseInvoiceRedemptions;
 
 // ─── Returns ────────────────────────────────────────────────────────────────
 

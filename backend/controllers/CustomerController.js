@@ -2,6 +2,7 @@ import Customer from "../model/Customer.js";
 import SalesInvoice from "../model/SalesInvoice.js";
 import LoyaltyLedger from "../model/LoyaltyLedger.js";
 import StoreCredit from "../model/StoreCredit.js";
+import GiftCard from "../model/GiftCard.js";
 import { requireUser, locFilter, canSeeLoc } from "../utils/userScope.js";
 import { normalizePhone, round2, valuePerPoint } from "../utils/retailMath.js";
 import {
@@ -92,13 +93,14 @@ export const getCustomer = async (req, res) => {
 
     await expireStaleCredits();
     const invoiceFilter = { customerId: customer._id, ...(who.scope.all ? {} : { locCode: { $in: who.scope.locCodes } }) };
-    const [invoices, ledger, storeCredits, fresh] = await Promise.all([
+    const [invoices, ledger, storeCredits, fresh, giftCards] = await Promise.all([
       SalesInvoice.find(invoiceFilter)
         .select("invoiceNumber invoiceDate finalTotal amountDue totalRedeemed category branch locCode status returnStatus loyaltyPointsEarned loyaltyPointsUsed refundBreakdown")
         .sort({ invoiceDate: -1, createdAt: -1 }).limit(500).lean(),
       LoyaltyLedger.find({ customerId: customer._id }).sort({ createdAt: -1 }).limit(500).lean(),
       StoreCredit.find({ customerId: customer._id }).sort({ createdAt: -1 }).lean(),
       Customer.findById(customer._id).lean(),
+      GiftCard.find({ soldToCustomerId: customer._id }).select("-history").sort({ createdAt: -1 }).lean(),
     ]);
     const sales = invoices.filter((i) => !RETURN_CATEGORIES.includes(String(i.category || "").toLowerCase()));
     const stats = {
@@ -110,7 +112,7 @@ export const getCustomer = async (req, res) => {
       returnCount: invoices.length - sales.length,
       lastVisit: invoices[0]?.invoiceDate || null,
     };
-    res.json({ customer: fresh, stats, invoices, ledger, storeCredits });
+    res.json({ customer: fresh, stats, invoices, ledger, storeCredits, giftCards });
   } catch (err) { fail(res, err, "Get customer"); }
 };
 

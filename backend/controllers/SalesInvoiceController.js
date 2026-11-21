@@ -9,7 +9,7 @@ import mongoose from "mongoose";
 import { assignVendorsToLines, applyVendorAllocations } from "../utils/vendorStock.js";
 import {
   HttpError, UndoStack, findOrCreateCustomer, getLoyaltySettings, planRedemptions, applyRedemptions,
-  computeEarn, postEarn, reverseInvoiceLoyalty, previewReturn, applyReturnRefund, snapshotLineCosts, toId,
+  computeEarn, postEarn, reverseInvoiceRedemptions, previewReturn, applyReturnRefund, snapshotLineCosts, toId,
 } from "../utils/redemptions.js";
 import { round2, normalizePhone } from "../utils/retailMath.js";
 
@@ -239,19 +239,22 @@ export const createSalesInvoice = async (req, res) => {
     try {
       if (isReturnInvoice) {
         if (Array.isArray(requestedRedemptions) && requestedRedemptions.length) {
-          throw new HttpError(400, "Loyalty points and store credit cannot be used on a return.");
+          throw new HttpError(400, "Loyalty points, store credit, gift cards and vouchers cannot be used on a return.");
         }
         const origId = toId(invoiceData.originalInvoiceId);
         if (origId) original = await SalesInvoice.findById(origId).lean();
+        split = previewReturn(original, invoiceData.finalTotal, refundMode);
         if (original?.customerId) {
           invoiceData.customerId = original.customerId;
-        } else if (refundMode === "storeCredit") {
+        } else if (split.storeCreditAmount > 0) {
+          // Store credit (chosen, or the gift-card share of a walk-in bill) needs a customer record
           customer = await findOrCreateCustomer({ name: invoiceData.customer, phone: invoiceData.customerPhone, locCode: invoiceData.locCode, createdBy: userId });
           invoiceData.customerId = customer?._id || null;
         }
-        split = previewReturn(original, invoiceData.finalTotal, refundMode);
         if (split.storeCreditAmount > 0 && !invoiceData.customerId) {
-          throw new HttpError(400, "A refund as store credit needs the customer's phone number.");
+          throw new HttpError(400, refundMode === "storeCredit"
+            ? "A refund as store credit needs the customer's phone number."
+            : `₹${split.storeCreditAmount.toFixed(2)} of this bill was paid by gift card or store credit, so it can only be refunded as store credit, which needs the customer's phone number.`);
         }
         invoiceData.amountDue = -split.cashRefund;
         invoiceData.totalRedeemed = round2(split.returnValue - split.cashRefund);
@@ -261,7 +264,7 @@ export const createSalesInvoice = async (req, res) => {
         invoiceData.customerId = customer?._id || null;
         const settings = await getLoyaltySettings(invoiceData.locCode);
         const finalTotal = round2(Number(invoiceData.finalTotal) || 0);
-        plan = await planRedemptions({ requested: requestedRedemptions, finalTotal, customer, settings });
+        plan = await planRedemptions({ requested: requestedRedemptions, finalTotal, customer, settings, lines: invoiceData.lineItems, locCode: invoiceData.locCode });
         earn = computeEarn({ customer, finalTotal, plan, settings });
         Object.assign(invoiceData, {
           redemptions: plan.redemptions,
@@ -775,7 +778,7 @@ export const updateSalesInvoice = async (req, res) => {
     try {
       if (redoLoyalty) {
         // Reverse what the invoice applied, then apply the edited version from fresh balances
-        await reverseInvoiceLoyalty({ invoice: oldInvoice, createdBy: userId, reason: `Invoice ${oldInvoice.invoiceNumber} edited`, undo });
+        await reverseInvoiceRedemptions({ invoice: oldInvoice, createdBy: userId, reason: `Invoice ${oldInvoice.invoiceNumber} edited`, undo });
         const merged = { ...oldInvoice, ...req.body };
         customer = await findOrCreateCustomer({ name: merged.customer, phone: merged.customerPhone, locCode: merged.locCode, createdBy: userId });
         const settings = await getLoyaltySettings(merged.locCode);
@@ -783,6 +786,8 @@ export const updateSalesInvoice = async (req, res) => {
         const plan = await planRedemptions({
           requested: requestedRedemptions !== undefined ? requestedRedemptions : oldInvoice.redemptions,
           finalTotal, customer, settings,
+          lines: Array.isArray(req.body.lineItems) ? req.body.lineItems : oldInvoice.lineItems,
+          locCode: merged.locCode,
         });
         earn = computeEarn({ customer, finalTotal, plan, settings });
         Object.assign(req.body, {
@@ -950,7 +955,7 @@ export const deleteSalesInvoice = async (req, res) => {
     const undo = new UndoStack();
     undo.push("stock", () => undoMovements(restored));
     try {
-      await reverseInvoiceLoyalty({
+      await reverseInvoiceRedemptions({
         invoice: invoiceToDelete.toObject(),
         createdBy: userId || "",
         reason: `Invoice ${invoiceToDelete.invoiceNumber} deleted`,

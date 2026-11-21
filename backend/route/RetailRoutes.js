@@ -6,6 +6,12 @@ import { getSettings, saveSettings, removeStoreOverride } from "../controllers/L
 import {
   listStoreCredits, getStoreCredit, voidStoreCredit, getStoreCreditSettings, saveStoreCreditSettings, checkRedemption,
 } from "../controllers/StoreCreditController.js";
+import {
+  listGiftCards, issueGiftCards, getGiftCard, getGiftCardBatch, reloadGiftCard, setGiftCardBlocked,
+} from "../controllers/GiftCardController.js";
+import {
+  listVouchers, createVouchers, getVoucher, getVoucherBatch, getScopeOptions, setVoucherActive,
+} from "../controllers/VoucherController.js";
 
 const router = express.Router();
 
@@ -29,6 +35,22 @@ router.get("/store-credits/settings", getStoreCreditSettings); // before /store-
 router.put("/store-credits/settings", saveStoreCreditSettings);
 router.get("/store-credits/:id", getStoreCredit);
 router.post("/store-credits/:id/void", voidStoreCredit);
+
+// Gift cards (F4)
+router.get("/gift-cards", listGiftCards);
+router.post("/gift-cards/issue", issueGiftCards);
+router.get("/gift-cards/batch/:saleRef", getGiftCardBatch); // before /gift-cards/:id
+router.get("/gift-cards/:id", getGiftCard);
+router.post("/gift-cards/:id/reload", reloadGiftCard);
+router.post("/gift-cards/:id/block", setGiftCardBlocked);
+
+// Vouchers (F5)
+router.get("/vouchers", listVouchers);
+router.post("/vouchers", createVouchers);
+router.get("/vouchers/scope-options", getScopeOptions); // before /vouchers/:id
+router.get("/vouchers/batch/:batchRef", getVoucherBatch);
+router.get("/vouchers/:id", getVoucher);
+router.patch("/vouchers/:id/active", setVoucherActive);
 
 // Billing screen "Apply" panel — preview what can be redeemed
 router.post("/redemptions/check", checkRedemption);

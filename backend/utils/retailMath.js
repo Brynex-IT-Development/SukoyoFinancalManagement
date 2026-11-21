@@ -74,6 +74,77 @@ export const pointsEarned = (earnBase, s) => {
   return Math.floor(base / per + 1e-9) * (Math.floor(Number(s.earnPoints)) || 0);
 };
 
+// ─── Vouchers (F5) ──────────────────────────────────────────────────────────
+
+const lowerSet = (arr) => new Set((arr || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+
+/** True when the voucher scope has no lists set (applies to every item). */
+export const isOpenScope = (scope = {}) =>
+  !["brands", "categories", "subCategories", "itemIds"].some((k) => (scope?.[k] || []).length > 0);
+
+/**
+ * Sum of line amounts whose item matches the voucher scope. A line matches when ANY set
+ * scope list matches (brand, category, sub category or item id). Empty scope = every line.
+ * lines: [{ amount, itemIds: [ids…], brand, categories: [..], subCategory }]
+ */
+export const voucherEligibleTotal = (lines, scope = {}) => {
+  const open = isOpenScope(scope);
+  const brands = lowerSet(scope.brands), cats = lowerSet(scope.categories), subs = lowerSet(scope.subCategories);
+  const ids = new Set((scope.itemIds || []).map(String));
+  let total = 0;
+  for (const l of lines || []) {
+    const amount = Number(l.amount) || 0;
+    if (amount <= 0) continue;
+    const match = open
+      || (l.brand && brands.has(String(l.brand).trim().toLowerCase()))
+      || (l.categories || []).some((c) => c && cats.has(String(c).trim().toLowerCase()))
+      || (l.subCategory && subs.has(String(l.subCategory).trim().toLowerCase()))
+      || (l.itemIds || []).some((id) => id && ids.has(String(id)));
+    if (match) total += amount;
+  }
+  return round2(total);
+};
+
+/**
+ * What a voucher is worth on this bill (before checking dates, owner and usage limits).
+ *  - value kind: min(balance, eligible total)
+ *  - discount kind: flat = min(value, eligible); percent = min(eligible × value / 100, maxDiscount)
+ * Both need finalTotal ≥ minBillAmount. Returns { allowed, reason?, amount }.
+ */
+export const voucherUsableAmount = ({ voucher: v, eligibleTotal, finalTotal }) => {
+  const eligible = Number(eligibleTotal) || 0;
+  if ((Number(finalTotal) || 0) < (Number(v.minBillAmount) || 0)) {
+    return { allowed: false, reason: `Bill must be at least ₹${v.minBillAmount} to use this voucher`, amount: 0 };
+  }
+  if (eligible <= 0) return { allowed: false, reason: "No item on this bill qualifies for this voucher", amount: 0 };
+  let amount;
+  if (v.kind === "value") {
+    amount = Math.min(Number(v.balance) || 0, eligible);
+    if (amount <= 0) return { allowed: false, reason: "This voucher has no balance left", amount: 0 };
+  } else if (v.discountType === "percent") {
+    const raw = eligible * (Number(v.value) || 0) / 100;
+    const cap = v.maxDiscount !== undefined && v.maxDiscount !== null && v.maxDiscount !== "" ? Number(v.maxDiscount) : Infinity;
+    amount = Math.min(raw, cap);
+  } else {
+    amount = Math.min(Number(v.value) || 0, eligible);
+  }
+  amount = round2(amount);
+  return amount > 0 ? { allowed: true, amount } : { allowed: false, reason: "This voucher gives no discount on this bill", amount: 0 };
+};
+
+// ─── Codes (gift cards / vouchers) ──────────────────────────────────────────
+
+// No 0/O, 1/I/L so codes read cleanly off a printed card
+export const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+/** e.g. randomCode("GC-", [4, 4], rnd) → "GC-7KQ2-M9XA". `rnd` returns 0 ≤ x < 1 (injectable for tests). */
+export const randomCode = (prefix, groups = [4, 4], rnd = Math.random) =>
+  prefix + groups.map((n) => Array.from({ length: n }, () => CODE_ALPHABET[Math.floor(rnd() * CODE_ALPHABET.length)]).join("")).join("-");
+
+/** Uppercase, trim, and allow only letters, digits and dashes. */
+export const cleanCode = (raw) => String(raw ?? "").trim().toUpperCase().replace(/\s+/g, "");
+export const isValidCode = (code) => /^[A-Z0-9][A-Z0-9-]{2,39}$/.test(code);
+
 /** Sum redemption amounts of one or more types. */
 export const redeemedOfType = (redemptions, ...types) =>
   round2((redemptions || []).filter((r) => types.includes(r.type)).reduce((s, r) => s + (Number(r.amount) || 0), 0));

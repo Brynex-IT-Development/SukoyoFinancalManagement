@@ -6,7 +6,8 @@ import { requireUser, locFilter, canSeeLoc } from "../utils/userScope.js";
 import { round2, normalizePhone, maxRedeemable, amountToPoints, pointsToAmount, valuePerPoint } from "../utils/retailMath.js";
 import {
   expireStaleCredits, refreshStoreCreditBalance, getLoyaltySettings, getStoreCreditExpiryDays,
-  STORE_CREDIT_EXPIRY_KEY, toId,
+  STORE_CREDIT_EXPIRY_KEY, toId, expireStaleGiftCards, findGiftCard, giftCardProblem, findVoucher,
+  evaluateVoucher, voucherLinesFrom,
 } from "../utils/redemptions.js";
 import { istDayStart, istDayEnd } from "../utils/ist.js";
 
@@ -96,8 +97,9 @@ export const voidStoreCredit = async (req, res) => {
 /**
  * POST /api/redemptions/check — what the billing screen may apply (preview only; the
  * invoice save re-checks everything). body:
- *   { userId, type: "loyalty"|"storeCredit", phone | customerId, finalTotal, otherRedeemed,
- *     points?, amount?, code?, refId?, locCode, invoiceId? (when editing: its own usage counts as available) }
+ *   { userId, type: "loyalty"|"storeCredit"|"giftCard"|"voucher", phone | customerId, finalTotal, otherRedeemed,
+ *     points?, amount?, code?, refId?, locCode, lines? (voucher scope), invoiceId? (when editing: its own usage counts as available) }
+ * Loyalty and store credit need a customer; gift cards and most vouchers do not.
  */
 export const checkRedemption = async (req, res) => {
   try {
@@ -110,14 +112,17 @@ export const checkRedemption = async (req, res) => {
     const customer = toId(req.body.customerId)
       ? await Customer.findById(req.body.customerId).lean()
       : normalizePhone(req.body.phone) ? await Customer.findOne({ phone: normalizePhone(req.body.phone) }).lean() : null;
-    if (!customer) return res.status(400).json({ message: "Enter the customer's phone number first. New customers have no points or store credit yet." });
     if (total <= 0) return res.status(400).json({ message: "Add items to the bill first." });
+    const needsCustomer = type === "loyalty" || type === "storeCredit";
+    if (needsCustomer && !customer) return res.status(400).json({ message: "Enter the customer's phone number first. New customers have no points or store credit yet." });
 
     // When editing, what this invoice already used is given back before the new version is applied
     let editInvoice = null;
     if (toId(invoiceId)) {
       editInvoice = await SalesInvoice.findById(invoiceId).select("customerId redemptions loyaltyApplied loyaltyPointsRestored returnStatus").lean();
-      if (!editInvoice?.loyaltyApplied || String(editInvoice.customerId) !== String(customer._id)) editInvoice = null;
+      if (!editInvoice?.loyaltyApplied) editInvoice = null;
+      // Customer-owned balances only count back for the same customer
+      else if (needsCustomer && String(editInvoice.customerId) !== String(customer._id)) editInvoice = null;
     }
 
     if (type === "loyalty") {
@@ -156,7 +161,39 @@ export const checkRedemption = async (req, res) => {
       return res.json({ type, refId: sc._id, code: sc.number, amount: want, maxAmount, balance, expiryDate: sc.expiryDate });
     }
 
-    if (type === "giftCard" || type === "voucher") return res.status(400).json({ message: "Gift cards and vouchers are not available yet." });
+    if (type === "giftCard") {
+      await expireStaleGiftCards();
+      const card = await findGiftCard({ refId, code });
+      const usedHere = editInvoice && card ? (editInvoice.redemptions || []).filter((r) => r.type === "giftCard" && String(r.refId) === String(card._id)).reduce((s, r) => s + (r.amount || 0), 0) : 0;
+      const problem = giftCardProblem(card, usedHere);
+      if (problem) return res.status(400).json({ message: problem });
+      const balance = round2((card.balance || 0) + usedHere);
+      const maxAmount = round2(Math.min(balance, room));
+      const want = amount !== undefined && amount !== null && amount !== "" ? round2(Number(amount)) : maxAmount;
+      if (!(want > 0)) return res.status(400).json({ message: "Nothing left to pay with a gift card.", maxAmount });
+      if (want > maxAmount + 0.004) return res.status(400).json({ message: `At most ₹${maxAmount} of ${card.code} can be used on this bill.`, maxAmount });
+      return res.json({ type, refId: card._id, code: card.code, amount: want, maxAmount, balance, expiryDate: card.expiryDate });
+    }
+
+    if (type === "voucher") {
+      const v = await findVoucher({ refId, code });
+      if (!v) return res.status(400).json({ message: `Voucher ${code || ""} was not found.`.replace("  ", " ") });
+      const usedHere = editInvoice ? (editInvoice.redemptions || []).find((r) => r.type === "voucher" && String(r.refId) === String(v._id)) || null : null;
+      try {
+        const { amount: worth, eligibleTotal } = evaluateVoucher({
+          voucher: v, customer, finalTotal: total, voucherLines: await voucherLinesFrom(req.body.lines || []), locCode, usedHere,
+        });
+        const maxAmount = round2(Math.min(worth, room));
+        if (!(maxAmount > 0)) return res.status(400).json({ message: "Nothing left to pay with a voucher." });
+        return res.json({
+          type, refId: v._id, code: v.code, amount: maxAmount, maxAmount, eligibleTotal, kind: v.kind,
+          label: v.kind === "value" ? `${v.code} (value)` : `${v.code} (${v.discountType === "percent" ? `${v.value}%` : `₹${v.value}`} off)`,
+        });
+      } catch (e) {
+        return res.status(e.status || 400).json({ message: e.message });
+      }
+    }
+
     return res.status(400).json({ message: "Unknown redemption type." });
   } catch (err) { serverError(res, err, "Redemption check"); }
 };

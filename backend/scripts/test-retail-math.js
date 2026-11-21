@@ -2,7 +2,7 @@
 // Run: node scripts/test-retail-math.js   (exits 1 on any failure)
 import {
   normalizePhone, maxRedeemable, pointsToAmount, amountToPoints, earnBaseOf, pointsEarned,
-  returnRefundSplit, valuePerPoint,
+  returnRefundSplit, valuePerPoint, voucherEligibleTotal, voucherUsableAmount, randomCode, cleanCode, isValidCode,
 } from "../utils/retailMath.js";
 import { formatNumber } from "../utils/nextNumber.js";
 import { istDayEnd, addIstDays } from "../utils/ist.js";
@@ -69,6 +69,32 @@ eq("second return restores only what is left", [r4.pointsRestore, r4.pointsRever
 // Plain invoice (no redemptions) behaves like today
 const r5 = returnRefundSplit({ baseTotal: 1000, returnValue: 300 });
 eq("no redemptions: full cash refund", [r5.cashRefund, r5.storeCreditAmount], [300, 0]);
+
+// ── Vouchers (F5)
+const lines = [
+  { amount: 1000, itemIds: ["a1"], brand: "Tanishq", categories: ["other", "Rings"], subCategory: "Gold" },
+  { amount: 500, itemIds: ["b2", "grp9"], brand: "Malabar", categories: ["other", "Chains"], subCategory: "Silver" },
+  { amount: 200, itemIds: ["c3"], brand: "", categories: ["other"], subCategory: "" },
+];
+eq("voucher: empty scope = whole bill", voucherEligibleTotal(lines, {}), 1700);
+eq("voucher: brand scope (case-insensitive)", voucherEligibleTotal(lines, { brands: ["tanishq"] }), 1000);
+eq("voucher: category OR item id", voucherEligibleTotal(lines, { categories: ["Chains"], itemIds: ["c3"] }), 700);
+eq("voucher: group id matches its variants", voucherEligibleTotal(lines, { itemIds: ["grp9"] }), 500);
+eq("voucher: nothing matches", voucherEligibleTotal(lines, { subCategories: ["Platinum"] }), 0);
+eq("value voucher: min(balance, eligible)", voucherUsableAmount({ voucher: { kind: "value", balance: 800 }, eligibleTotal: 500, finalTotal: 1700 }).amount, 500);
+eq("value voucher: balance smaller", voucherUsableAmount({ voucher: { kind: "value", balance: 300 }, eligibleTotal: 500, finalTotal: 1700 }).amount, 300);
+eq("flat voucher capped at eligible", voucherUsableAmount({ voucher: { kind: "discount", discountType: "flat", value: 750 }, eligibleTotal: 500, finalTotal: 1700 }).amount, 500);
+eq("percent voucher", voucherUsableAmount({ voucher: { kind: "discount", discountType: "percent", value: 10 }, eligibleTotal: 1000, finalTotal: 1700 }).amount, 100);
+eq("percent voucher with max", voucherUsableAmount({ voucher: { kind: "discount", discountType: "percent", value: 10, maxDiscount: 60 }, eligibleTotal: 1000, finalTotal: 1700 }).amount, 60);
+eq("voucher below min bill", voucherUsableAmount({ voucher: { kind: "discount", discountType: "flat", value: 100, minBillAmount: 2000 }, eligibleTotal: 1000, finalTotal: 1700 }).allowed, false);
+eq("voucher with nothing eligible", voucherUsableAmount({ voucher: { kind: "discount", discountType: "flat", value: 100 }, eligibleTotal: 0, finalTotal: 1700 }).allowed, false);
+
+// ── Codes
+let seq = 0;
+const fakeRnd = () => ((seq++ * 7) % 31) / 31;
+eq("gift card code format", /^GC-[2-9A-HJKMNP-Z]{4}-[2-9A-HJKMNP-Z]{4}$/.test(randomCode("GC-", [4, 4], fakeRnd)), true);
+eq("clean code", cleanCode("  gc-ab12 cd34 "), "GC-AB12CD34");
+eq("valid code", [isValidCode("GC-AB12-CD34"), isValidCode("A"), isValidCode("BAD CODE!")], [true, false, false]);
 
 // ── Numbering + IST helpers
 eq("number format", formatNumber("SC-", 1), "SC-000001");
