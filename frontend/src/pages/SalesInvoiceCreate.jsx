@@ -9,6 +9,8 @@ import { mapLocNameToWarehouse } from "../utils/warehouseMapping";
 import useSidebar from "../hooks/useSidebar";
 import useBillRedemptions from "../hooks/useBillRedemptions";
 import RedemptionPanel from "../components/billing/RedemptionPanel";
+import useBillTabs from "../hooks/useBillTabs";
+import BillTabs from "../components/billing/BillTabs";
 
 // Utility function to round to 2 decimal places without floating-point errors
 // This fixes issues like 9999.99 showing as 9999.989999 or 100.01 instead of 100.00
@@ -1924,7 +1926,10 @@ const SalesInvoiceCreate = () => {
       if (isEditMode) {
         navigate(`/sales/invoices/${id}`);
       } else {
-        navigate("/sales/invoices");
+        // Bill tabs (F6): stay on the billing screen; this tab becomes an empty bill
+        // so other open bills are not lost.
+        billTabs.resetActive();
+        showStockAlert(`Invoice ${data.invoiceNumber} saved.${redemption.totalRedeemed > 0 ? ` Amount collected ₹${Number(data.amountDue ?? 0).toFixed(2)}.` : ""}`, "success");
       }
     } catch (error) {
       console.error("Error saving invoice:", error);
@@ -2104,6 +2109,61 @@ Customer Service Available`;
   useEffect(() => {
     if (redemption.customer && !customer.trim()) setCustomer(redemption.customer.name);
   }, [redemption.customer]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Several bills open at once (F6) — logic in hooks/useBillTabs.js.
+  // One bill = these fields. Store-level fields (branch, warehouse, invoice date, category) are shared by all tabs.
+  const exportRedemptions = redemption.exportState;
+  const billState = useMemo(() => ({
+    customer, customerPhone, salesperson, subject, paymentMethod, isSplitPayment, splitPaymentAmounts,
+    lineItems, discount, applyDiscountAfterTax, showDiscountSection, tdsTcsType, tdsTcsTax, adjustment,
+    customerNotes, tax, totalTaxAmount, redemption: exportRedemptions(),
+  }), [customer, customerPhone, salesperson, subject, paymentMethod, isSplitPayment, splitPaymentAmounts,
+    lineItems, discount, applyDiscountAfterTax, showDiscountSection, tdsTcsType, tdsTcsTax, adjustment,
+    customerNotes, tax, totalTaxAmount, exportRedemptions]);
+  const makeEmptyBill = useCallback(() => ({
+    customer: "", customerPhone: "", salesperson: "", subject: "", paymentMethod: [], isSplitPayment: false,
+    splitPaymentAmounts: { cash: "", bank: "", upi: "", rbl: "" }, lineItems: [blankLineItem()],
+    discount: { value: "0", type: "₹" }, applyDiscountAfterTax: false, showDiscountSection: false,
+    tdsTcsType: "TDS", tdsTcsTax: "", adjustment: "0.00", customerNotes: "Thanks for your business.",
+    tax: "", totalTaxAmount: "", redemption: { redemptions: [], owner: null },
+  }), []);
+  const importRedemptions = redemption.importState;
+  const restoreBill = useCallback((b) => {
+    const e = makeEmptyBill();
+    const s = { ...e, ...(b || {}) };
+    setCustomer(s.customer ?? "");
+    setCustomerPhone(s.customerPhone ?? "");
+    setSalesperson(s.salesperson ?? "");
+    setSubject(s.subject ?? "");
+    setPaymentMethod(Array.isArray(s.paymentMethod) ? s.paymentMethod : []);
+    setIsSplitPayment(!!s.isSplitPayment);
+    setSplitPaymentAmounts(s.splitPaymentAmounts || e.splitPaymentAmounts);
+    setLineItems(Array.isArray(s.lineItems) && s.lineItems.length ? s.lineItems : e.lineItems);
+    setSelectedItems(new Set());
+    setDiscount(s.discount || e.discount);
+    setApplyDiscountAfterTax(!!s.applyDiscountAfterTax);
+    setShowDiscountSection(!!s.showDiscountSection);
+    setTdsTcsType(s.tdsTcsType || "TDS");
+    setTdsTcsTax(s.tdsTcsTax ?? "");
+    setAdjustment(s.adjustment ?? "0.00");
+    setCustomerNotes(s.customerNotes ?? e.customerNotes);
+    setTax(s.tax ?? "");
+    setTotalTaxAmount(s.totalTaxAmount ?? "");
+    importRedemptions(s.redemption);
+  }, [makeEmptyBill, importRedemptions]);
+  const billHasItems = useCallback((b) => (b?.lineItems || []).some((l) => l && (l.item || l.itemData)), []);
+  const billTabs = useBillTabs({
+    enabled: !isEditMode,
+    storageKey: (() => {
+      const u = getUserInfo() || {};
+      return `sukoyo.billTabs.v1.${(u.email || u.username || "user").toLowerCase()}.${u.locCode || "all"}`;
+    })(),
+    current: billState,
+    restore: restoreBill,
+    makeEmpty: makeEmptyBill,
+    hasItems: billHasItems,
+    notify: (msg) => showStockAlert(msg, "warning"),
+  });
 
   // Get user location code from localStorage (for default store creation)
   useEffect(() => {
@@ -3153,6 +3213,9 @@ Customer Service Available`;
             </div>
           </div>
         </div>
+
+        {/* ── Bill tabs (create mode only) ── */}
+        <BillTabs t={billTabs} disabled={isSaving} />
 
         {/* ── Body: Left Main Card + Right Sidebar (Equal Height with items-stretch) ── */}
         <div className="flex flex-col lg:flex-row flex-1 min-h-0 px-3 sm:px-6 pb-6 gap-4 items-stretch">
