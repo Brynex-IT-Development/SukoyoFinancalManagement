@@ -5,7 +5,7 @@ import { ArrowLeft, Pencil, Download } from "lucide-react";
 import Header from "../components/Header";
 import useSidebar from "../hooks/useSidebar";
 import {
-  api, formatCurrency, formatDate, formatDateTime, isAdminUser, ui, LEDGER_LABELS, STORE_CREDIT_STATUS_STYLES,
+  api, formatCurrency, formatDate, formatDateTime, isAdminUser, ui, LEDGER_LABELS, STORE_CREDIT_STATUS_STYLES, GIFT_CARD_STATUS_STYLES,
 } from "../utils/retailApi";
 
 const Stat = ({ label, value }) => (
@@ -53,7 +53,8 @@ const CustomerDetail = () => {
   if (!data) return (<><Header title="Customer" /><div className={`${ui.page} ${isSidebarOpen ? "ml-64" : "ml-0"} p-6`}><p className="text-xs text-[#6B7280]">Loading...</p></div></>);
 
   const { customer: c, stats, invoices, ledger, storeCredits } = data;
-  const tabs = [["invoices", `Invoices (${invoices.length})`], ["points", `Points (${ledger.length})`], ["credits", `Store Credit (${storeCredits.length})`]];
+  const giftCards = data.giftCards || [];
+  const tabs = [["invoices", `Invoices (${invoices.length})`], ["points", `Points (${ledger.length})`], ["credits", `Store Credit (${storeCredits.length})`], ["giftCards", `Gift Cards (${giftCards.length})`]];
 
   return (
     <>
@@ -196,7 +197,29 @@ const CustomerDetail = () => {
               </table>
             </section>
           )}
-          <p className="text-[11px] text-[#9CA3AF]">Gift cards will appear here once gift cards are added (Phase 2).</p>
+          {tab === "giftCards" && (
+            <section className={`${ui.card} overflow-x-auto`}>
+              <table className="min-w-full border-collapse">
+                <thead><tr className={ui.theadRow}>
+                  <th className={ui.th}>Code</th><th className={ui.th}>Bought</th><th className={ui.th}>Expires</th>
+                  <th className={ui.thRight}>Value</th><th className={ui.thRight}>Balance</th><th className="px-3 py-3 text-left">Status</th>
+                </tr></thead>
+                <tbody className="divide-y divide-[#F3F4F6] text-xs">
+                  {giftCards.length === 0 && <tr><td colSpan={6} className="px-3 py-8 text-center text-[#6B7280]">No gift cards bought by this customer.</td></tr>}
+                  {giftCards.map((g) => (
+                    <tr key={g._id}>
+                      <td className={ui.td}><Link to={`/offers/gift-cards/${g._id}`} className="font-mono font-semibold text-[#1C1F26] hover:underline">{g.code}</Link></td>
+                      <td className={ui.td}>{formatDate(g.issueDate)}</td>
+                      <td className={ui.td}>{g.expiryDate ? formatDate(g.expiryDate) : "Never"}</td>
+                      <td className={`${ui.td} text-right`}>{formatCurrency(g.initialValue)}</td>
+                      <td className={`${ui.td} text-right font-semibold`}>{formatCurrency(g.balance)}</td>
+                      <td className={ui.td}><span className={`${ui.badge} ${GIFT_CARD_STATUS_STYLES[g.status] || ""}`}>{g.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
         </div>
       </div>
     </>

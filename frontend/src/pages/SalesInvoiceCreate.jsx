@@ -2097,6 +2097,7 @@ Customer Service Available`;
     phone: customerPhone,
     finalTotal: totals.finalTotal,
     locCode: billLocCode,
+    lines: lineItems,
     invoiceId: isEditMode ? id : undefined,
   });
   // Fill in a known customer's name when the cashier has not typed one

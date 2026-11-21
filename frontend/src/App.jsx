@@ -61,6 +61,12 @@ import CustomerCreate from "./pages/CustomerCreate.jsx";
 import CustomerDetail from "./pages/CustomerDetail.jsx";
 import StoreCreditDetail from "./pages/StoreCreditDetail.jsx";
 import LoyaltySettings from "./pages/LoyaltySettings.jsx";
+import GiftCards from "./pages/GiftCards.jsx";
+import GiftCardIssue from "./pages/GiftCardIssue.jsx";
+import GiftCardDetail from "./pages/GiftCardDetail.jsx";
+import Vouchers from "./pages/Vouchers.jsx";
+import VoucherCreate from "./pages/VoucherCreate.jsx";
+import VoucherDetail from "./pages/VoucherDetail.jsx";
 import InactiveItems from "./pages/InactiveItems.jsx";
 import PurchaseVendors from "./pages/PurchaseVendors.jsx";
 import PurchaseVendorCreate from "./pages/PurchaseVendorCreate.jsx";
@@ -241,7 +247,14 @@ const App = () => {
           <Route path="/sales/customers/new" element={currentuser ? <CustomerCreate /> : <Navigate to="/login" />} />
           <Route path="/sales/customers/:id/edit" element={currentuser ? <CustomerCreate /> : <Navigate to="/login" />} />
           <Route path="/sales/customers/:id" element={currentuser ? <CustomerDetail /> : <Navigate to="/login" />} />
-          <Route path="/sales/loyalty-settings" element={currentuser ? <LoyaltySettings /> : <Navigate to="/login" />} />
+          <Route path="/sales/loyalty-settings" element={<Navigate to="/offers/loyalty-settings" replace />} />
+          <Route path="/offers/loyalty-settings" element={currentuser ? <LoyaltySettings /> : <Navigate to="/login" />} />
+          <Route path="/offers/gift-cards" element={currentuser ? <GiftCards /> : <Navigate to="/login" />} />
+          <Route path="/offers/gift-cards/new" element={currentuser ? <GiftCardIssue /> : <Navigate to="/login" />} />
+          <Route path="/offers/gift-cards/:id" element={currentuser ? <GiftCardDetail /> : <Navigate to="/login" />} />
+          <Route path="/offers/vouchers" element={currentuser ? <Vouchers /> : <Navigate to="/login" />} />
+          <Route path="/offers/vouchers/new" element={currentuser ? <VoucherCreate /> : <Navigate to="/login" />} />
+          <Route path="/offers/vouchers/:id" element={currentuser ? <VoucherDetail /> : <Navigate to="/login" />} />
           <Route path="/sales/orders" element={currentuser ? <SalesOrders /> : <Navigate to="/login" />} />
           <Route path="/sales/invoices" element={currentuser ? <SalesInvoices /> : <Navigate to="/login" />} />
           <Route path="/sales/invoices/returns" element={currentuser ? <SalesInvoiceReturns /> : <Navigate to="/login" />} />

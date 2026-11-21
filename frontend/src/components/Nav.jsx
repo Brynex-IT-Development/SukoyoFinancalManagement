@@ -32,7 +32,9 @@ import {
     ChevronLeft,
     ArrowDownRight,
     ArrowUpRight,
-    Wallet
+    Wallet,
+    Gift,
+    Ticket
 } from "lucide-react";
 import salesInventoryAccessConfig from "../config/salesInventoryAccess.json";
 import baseUrl from "../api/api.js";
@@ -229,6 +231,9 @@ const Nav = () => {
         if (activePath.startsWith("/sales")) {
             return "sales";
         }
+        if (activePath.startsWith("/offers")) {
+            return "offers";
+        }
         if (activePath.startsWith("/purchase")) {
             return "purchase";
         }
@@ -249,6 +254,7 @@ const Nav = () => {
     const isSalesOpen = openSection === "sales";
     const isPurchaseOpen = openSection === "purchase";
     const isManageUsersOpen = openSection === "manageUsers";
+    const isOffersOpen = openSection === "offers";
 
     const inventoryLinks = [
         { to: "/shoe-sales/items", label: "Items", Icon: List },
@@ -270,10 +276,15 @@ const Nav = () => {
         { to: "/sales/returns", label: "Invoice Return", Icon: RotateCcw },
         { to: "/sales/customers", label: "Customers", Icon: Users },
         { to: "/sales/credit-notes", label: "Store Credit", Icon: ReceiptText },
+    ];
+    const offersLinks = [
+        { to: "/offers/gift-cards", label: "Gift Cards", Icon: Gift },
+        { to: "/offers/vouchers", label: "Vouchers", Icon: Ticket },
         ...(currentuser?.power === 'admin' || currentuser?.role === 'admin' || currentuser?.role === 'superadmin'
-            ? [{ to: "/sales/loyalty-settings", label: "Loyalty Settings", Icon: SlidersHorizontal }]
+            ? [{ to: "/offers/loyalty-settings", label: "Loyalty Settings", Icon: SlidersHorizontal }]
             : []),
     ];
+    const isOffersActive = activePath.startsWith("/offers");
     const isInventoryActive = inventoryLinks.some((link) => link.to === activePath) ||
         activePath.startsWith("/shoe-sales/items") ||
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/item-groups")) ||
@@ -488,6 +499,26 @@ const Nav = () => {
                                         {isSalesOpen && (
                                             <div className="mt-1 space-y-0.5 border-l border-[#27272a] ml-[25px]">
                                                 {salesLinks.map(({ to, label }) => (
+                                                    <Link key={to} to={to} className={subLinkClasses(to)}><span>{label}</span></Link>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Offers: gift cards, vouchers, loyalty settings */}
+                                {hasSalesInventoryAccess && (
+                                    <div>
+                                        <button onClick={() => setOpenSection(isOffersOpen ? null : "offers")} className={groupButtonClasses(isOffersOpen, isOffersActive)}>
+                                            <div className="flex w-full items-center gap-3.5">
+                                                <Gift size={18} className="shrink-0" />
+                                                <span className="flex-1 text-left whitespace-nowrap truncate">Offers</span>
+                                                <ChevronDown size={16} className={`shrink-0 transition-transform ${isOffersOpen ? "rotate-180" : "rotate-0"} ${isOffersActive ? "text-white" : "text-zinc-400 group-hover:text-white"}`} />
+                                            </div>
+                                        </button>
+                                        {isOffersOpen && (
+                                            <div className="mt-1 space-y-0.5 border-l border-[#27272a] ml-[25px]">
+                                                {offersLinks.map(({ to, label }) => (
                                                     <Link key={to} to={to} className={subLinkClasses(to)}><span>{label}</span></Link>
                                                 ))}
                                             </div>

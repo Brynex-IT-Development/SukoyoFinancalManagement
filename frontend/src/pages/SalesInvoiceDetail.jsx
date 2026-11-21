@@ -20,6 +20,7 @@ import {
   Phone
 } from "lucide-react";
 import baseUrl from "../api/api";
+import { redemptionLabel } from "../utils/retailApi";
 import useSidebar from "../hooks/useSidebar";
 import Header from "../components/Header";
 import { mapLocNameToWarehouse as mapWarehouse } from "../utils/warehouseMapping";
@@ -1313,7 +1314,7 @@ const SalesInvoiceDetail = () => {
                     {(invoice.redemptions || []).map((r, idx) => (
                       <div key={idx} className="flex justify-between text-xs py-1 text-red-600">
                         <span className="font-medium">
-                          {r.type === "loyalty" ? `Loyalty points (${r.points} pts)` : r.type === "storeCredit" ? `Store credit ${r.code}` : `${r.type} ${r.code || ""}`}
+                          {redemptionLabel(r)}
                         </span>
                         <span className="font-bold">(-) {formatCurrency(r.amount)}</span>
                       </div>
@@ -1334,7 +1335,7 @@ const SalesInvoiceDetail = () => {
                           </div>
                         )}
                         {invoice.refundBreakdown.nonRefundable > 0 && (
-                          <div className="flex justify-between"><span className="text-[#6B7280]">Not refundable (paid with points)</span><span className="font-semibold">{formatCurrency(invoice.refundBreakdown.nonRefundable)}</span></div>
+                          <div className="flex justify-between"><span className="text-[#6B7280]">Not refundable (paid with points / voucher)</span><span className="font-semibold">{formatCurrency(invoice.refundBreakdown.nonRefundable)}</span></div>
                         )}
                         {(invoice.refundBreakdown.pointsRestored > 0 || invoice.refundBreakdown.pointsReversed > 0) && (
                           <div className="flex justify-between"><span className="text-[#6B7280]">Loyalty points</span><span className="font-semibold">+{invoice.refundBreakdown.pointsRestored || 0} back / −{invoice.refundBreakdown.pointsReversed || 0} earned</span></div>
@@ -1486,7 +1487,7 @@ const SalesInvoiceDetail = () => {
                     <div className="mt-2 text-[11px] bg-[#F9FAFB] border border-[#E5E7EB] p-2.5 space-y-0.5">
                       {refundPreview.cashRefund > 0 && <div className="flex justify-between"><span>Pay out ({returnPaymentMethod})</span><b>₹{refundPreview.cashRefund.toFixed(2)}</b></div>}
                       {refundPreview.storeCreditAmount > 0 && <div className="flex justify-between"><span>Issue as store credit</span><b>₹{refundPreview.storeCreditAmount.toFixed(2)}</b></div>}
-                      {refundPreview.nonRefundable > 0 && <div className="flex justify-between text-[#92400E]"><span>Not refundable (paid with points)</span><b>₹{refundPreview.nonRefundable.toFixed(2)}</b></div>}
+                      {refundPreview.nonRefundable > 0 && <div className="flex justify-between text-[#92400E]"><span>Not refundable (paid with points / voucher)</span><b>₹{refundPreview.nonRefundable.toFixed(2)}</b></div>}
                       {(refundPreview.pointsRestore > 0 || refundPreview.pointsReverse > 0) && (
                         <div className="flex justify-between"><span>Loyalty points</span><b>+{refundPreview.pointsRestore} back / −{refundPreview.pointsReverse} earned</b></div>
                       )}
