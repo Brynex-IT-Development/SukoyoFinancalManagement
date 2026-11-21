@@ -1,36 +1,17 @@
 import Bill from "../model/Bill.js";
 import VendorPayment from "../model/VendorPayment.js";
 import VendorCredit from "../model/VendorCredit.js";
-import { requireUser, locFilter } from "../utils/userScope.js";
+import { requireUser } from "../utils/userScope.js";
 import { round2 } from "../utils/retailMath.js";
 import { withPaymentInfo, outstandingByVendor, agingByVendor, buildStatement, AGING_BUCKETS } from "../utils/payables.js";
 import { PAYABLE_STATUS_FILTER, vendorKeyOf, findVendor } from "../utils/billPayments.js";
-import { istDayStart, istDayEnd, istDateString } from "../utils/ist.js";
+import { istDateString } from "../utils/ist.js";
+import { escapeRegex, dayStart, dayEnd, storeFilter } from "../utils/reportScope.js";
 
 const serverError = (res, err, label) => {
   console.error(`${label} error:`, err);
   res.status(500).json({ message: "Server error", error: err.message });
 };
-const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const dayStart = (d) => istDayStart(new Date(`${d}T12:00:00+05:30`));
-const dayEnd = (d) => istDayEnd(new Date(`${d}T12:00:00+05:30`));
-
-/**
- * Store filter + the user's store scope, for bills/credits/payments.
- * locCode matches the document's store; with withWarehouse, a document that has no locCode
- * (older bills) matches when its warehouse/branch name equals `warehouse` (the store's name).
- */
-const storeFilter = (who, { locCode, warehouse }, { withWarehouse = true } = {}) => {
-  const and = [];
-  if (!who.scope.all) and.push(locFilter(who.scope));
-  const hasWarehouse = warehouse && withWarehouse && warehouse !== "All Stores";
-  const rx = hasWarehouse ? { $regex: `^${escapeRegex(String(warehouse))}$`, $options: "i" } : null;
-  if (locCode && rx) and.push({ $or: [{ locCode: String(locCode) }, { locCode: { $in: [null, ""] }, $or: [{ warehouse: rx }, { branch: rx }] }] });
-  else if (locCode) and.push({ locCode: String(locCode) });
-  else if (rx) and.push({ $or: [{ warehouse: rx }, { branch: rx }] });
-  return and.length ? { $and: and } : {};
-};
-
 /** Filter for "this vendor": vendorKey from a report row (id:<vendorId> or name:<lower name>). */
 const vendorFilterFromKey = (key) => {
   if (!key) return {};

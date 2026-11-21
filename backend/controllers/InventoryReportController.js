@@ -137,7 +137,7 @@ const WAREHOUSE_NAME_MAPPING = {
   "-Kannur Branch": "Kannur Branch", // Remove leading dash
 };
 
-const normalizeWarehouseName = (warehouseName) => {
+export const normalizeWarehouseName = (warehouseName) => {
   if (!warehouseName) return null;
   const trimmed = warehouseName.toString().trim();
   if (WAREHOUSE_NAME_MAPPING[trimmed]) {
@@ -153,7 +153,7 @@ const normalizeWarehouseName = (warehouseName) => {
 };
 
 // Get all possible warehouse name variations for a given warehouse
-const getWarehouseNameVariations = (warehouseName) => {
+export const getWarehouseNameVariations = (warehouseName) => {
   if (!warehouseName) return [];
   const normalized = normalizeWarehouseName(warehouseName);
   const variations = [normalized, warehouseName];
