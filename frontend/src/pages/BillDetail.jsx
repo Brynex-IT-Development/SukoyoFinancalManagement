@@ -324,7 +324,12 @@ const BillDetail = () => {
     }
   }
 
-  const balanceDue = parseFloat(bill.finalTotal) || 0;
+  // F9: balance = total − paid − credits applied (from the server); older API → total
+  const balanceDue = bill.balanceDue !== undefined && bill.balanceDue !== null ? parseFloat(bill.balanceDue) || 0 : parseFloat(bill.finalTotal) || 0;
+  const paidAmount = parseFloat(bill.amountPaid) || 0;
+  const creditsAmount = parseFloat(bill.creditsApplied) || 0;
+  const PAYMENT_LABEL = { paid: "Paid", partially_paid: "Partly paid", overdue: "Overdue", unpaid: "Unpaid" };
+  const isPayable = !["draft", "cancelled", "void"].includes(String(bill.status || "").toLowerCase());
 
   // Process bills for sidebar
   const processedBills = bills.map((b) => {
@@ -697,14 +702,60 @@ const BillDetail = () => {
                   </span>
                 </div>
 
+                {paidAmount > 0 && (
+                  <div className="flex justify-between text-sm text-[#15803d]">
+                    <span>Payments made</span>
+                    <span>(−) {formatCurrency(paidAmount)}</span>
+                  </div>
+                )}
+                {creditsAmount > 0 && (
+                  <div className="flex justify-between text-sm text-[#15803d]">
+                    <span>Vendor credits applied</span>
+                    <span>(−) {formatCurrency(creditsAmount)}</span>
+                  </div>
+                )}
                 <div className={ui.grandRow}>
-                  <span className={ui.grandLabel}>Balance Due</span>
+                  <span className={ui.grandLabel}>Balance Due{isPayable && bill.paymentStatus ? ` · ${PAYMENT_LABEL[bill.paymentStatus] || ""}` : ""}</span>
                   <span className={ui.grandValue}>
                     {formatCurrency(balanceDue)}
                   </span>
                 </div>
               </div>
             </div>
+
+            {/* Payments and credits on this bill (F9) */}
+            {((bill.payments || []).length > 0 || (bill.appliedCredits || []).length > 0 || (isPayable && balanceDue > 0.004)) && (
+              <div className="px-8 py-6 border-t border-gray-100">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className={ui.docLabel}>Payments</h3>
+                  {isPayable && balanceDue > 0.004 && (
+                    <Link to={`/purchase/payments/new?vendorId=${encodeURIComponent(bill.vendorId || "")}&billId=${bill._id}`} className={ui.btnOutline}>Record payment</Link>
+                  )}
+                </div>
+                {(bill.payments || []).length === 0 && (bill.appliedCredits || []).length === 0 ? (
+                  <p className="text-sm text-gray-500">No payments yet.</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <tbody className="divide-y divide-gray-100">
+                      {(bill.payments || []).map((pm) => (
+                        <tr key={String(pm.paymentId)}>
+                          <td className="py-1.5">{pm.date ? new Date(pm.date).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : ""}</td>
+                          <td className="py-1.5"><Link to={`/purchase/payments/${pm.paymentId}`} className="font-semibold hover:underline">{pm.paymentNumber}</Link></td>
+                          <td className="py-1.5 text-right">{formatCurrency(pm.amount)}</td>
+                        </tr>
+                      ))}
+                      {(bill.appliedCredits || []).map((cr, i) => (
+                        <tr key={`cr-${i}`}>
+                          <td className="py-1.5">{cr.appliedDate ? new Date(cr.appliedDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : ""}</td>
+                          <td className="py-1.5">Credit {cr.creditNoteNumber}</td>
+                          <td className="py-1.5 text-right">{formatCurrency(cr.appliedAmount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
 
             {/* Notes */}
             {bill.notes && (

@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { logVendorActivity, getOriginatorName } from "../utils/vendorHistoryLogger.js";
 import { updateMonthlyStockForPurchase } from "../utils/monthlyStockTracking.js";
 import { resolveLine, moveStock, applyLines, StockError } from "../utils/stockService.js";
+import { withPaymentInfo } from "../utils/payables.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VENDOR-CODE EXTRACTION  &  BASE-NAME SKU MATCHING
@@ -1329,8 +1330,10 @@ export const getBills = async (req, res) => {
     if (status) query.status = status;
     
     const bills = await Bill.find(query)
-      .sort({ createdAt: -1 });
-    res.status(200).json(bills);
+      .sort({ createdAt: -1 })
+      .lean();
+    // Paid / balance / payment status for every bill (F9)
+    res.status(200).json(bills.map((b) => withPaymentInfo(b)));
   } catch (error) {
     console.error("Get bills error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -1412,7 +1415,7 @@ export const getBillById = async (req, res) => {
       await bill.save().catch(err => console.warn("Could not sync bill SKUs in getBillById:", err));
     }
     
-    res.status(200).json(billObj);
+    res.status(200).json(withPaymentInfo(billObj));
   } catch (error) {
     console.error("Get bill error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -1431,10 +1434,20 @@ export const updateBill = async (req, res) => {
       return res.status(404).json({ message: "Bill not found" });
     }
     
+    // Payment fields are managed by vendor payments / credits only (F9), never by the bill form
+    for (const f of ["amountPaid", "creditsApplied", "payments", "appliedCredits"]) delete billData[f];
+
     const oldStatus = existingBill.status;
     const newStatus = billData.status || oldStatus;
     const oldFinalTotal = parseFloat(existingBill.finalTotal) || 0;
     const newFinalTotal = parseFloat(billData.finalTotal) || oldFinalTotal;
+    const settled = (Number(existingBill.amountPaid) || 0) + (Number(existingBill.creditsApplied) || 0);
+    if (settled > 0.004 && newFinalTotal < settled - 0.004) {
+      return res.status(409).json({ message: `This bill already has ₹${settled.toFixed(2)} paid or credited, so its total cannot go below that. Delete the payment first.` });
+    }
+    if (settled > 0.004 && ["draft", "cancelled", "void"].includes(String(newStatus).toLowerCase())) {
+      return res.status(409).json({ message: "This bill has payments or credits applied, so it cannot be set back to draft or cancelled. Delete the payments first." });
+    }
     const sourceType = billData.sourceType || existingBill.sourceType || "direct";
     
     // Determine target warehouse from billData.warehouse, existingBill.warehouse, user's email, or locCode
@@ -1889,6 +1902,10 @@ export const deleteBill = async (req, res) => {
     const bill = await Bill.findById(id);
     if (!bill) {
       return res.status(404).json({ message: "Bill not found" });
+    }
+    // A bill with vendor payments or credits applied cannot be deleted (they would be left pointing at nothing)
+    if ((Number(bill.amountPaid) || 0) > 0.004 || (Number(bill.creditsApplied) || 0) > 0.004) {
+      return res.status(409).json({ message: `Bill ${bill.billNumber} has payments or vendor credits applied. Delete those payments first.` });
     }
     
     const sourceType = bill.sourceType || "direct";

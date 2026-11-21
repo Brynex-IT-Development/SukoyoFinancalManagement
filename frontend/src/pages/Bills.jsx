@@ -6144,9 +6144,8 @@ const Bills = () => {
     let isOverdue = false;
     let overdueDays = 0;
     
-    // Calculate balance due to check if bill is paid
-    // Note: balanceDue is calculated from finalTotal (bills don't have a separate balanceDue field)
-    const balanceDue = parseFloat(bill.finalTotal) || 0;
+    // Balance due from the server (finalTotal − amountPaid − creditsApplied, F9); older API → total
+    const balanceDue = bill.balanceDue !== undefined && bill.balanceDue !== null ? parseFloat(bill.balanceDue) || 0 : parseFloat(bill.finalTotal) || 0;
     
     // Check if bill is completed/paid - if status is "completed", "paid", or "cancelled", never mark as overdue
     const isCompletedStatus = bill.status === "completed" || 
@@ -6228,6 +6227,8 @@ const Bills = () => {
       dueDate: formatDate(bill.dueDate),
       amount: `₹${(parseFloat(bill.finalTotal) || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
       balanceDue: `₹${balanceDue.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      paid: `₹${((parseFloat(bill.amountPaid) || 0) + (parseFloat(bill.creditsApplied) || 0)).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      paymentStatus: bill.paymentStatus || "",
       isOverdue: isOverdue,
       overdueDays: overdueDays,
       finalTotal: parseFloat(bill.finalTotal) || 0,
@@ -6815,15 +6816,21 @@ const Bills = () => {
                   <th scope="col" className="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-white border-r border-[#333333]">
                     AMOUNT
                   </th>
-                  <th scope="col" className="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-white">
+                  <th scope="col" className="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-white border-r border-[#333333]">
+                    PAID
+                  </th>
+                  <th scope="col" className="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-white border-r border-[#333333]">
                     BALANCE DUE
+                  </th>
+                  <th scope="col" className="px-3 py-3 text-left text-xs font-bold uppercase tracking-wider text-white">
+                    PAYMENT
                   </th>
                 </tr>
               </thead>
               <tbody className="bg-white">
                 {loading ? (
                   <tr>
-                    <td colSpan={9} className="px-6 py-16 text-center">
+                    <td colSpan={11} className="px-6 py-16 text-center">
                       <div className="flex flex-col items-center justify-center gap-3">
                         <div className="h-7 w-7 animate-spin rounded-none border-2 border-[#1e1e1e] border-t-transparent"></div>
                         <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Loading bills...</p>
@@ -6832,7 +6839,7 @@ const Bills = () => {
                   </tr>
                 ) : processedBills.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-6 py-16 text-center">
+                    <td colSpan={11} className="px-6 py-16 text-center">
                       <div className="flex flex-col items-center justify-center">
                         <div className="w-14 h-14 rounded-none bg-[#f1f5f9] flex items-center justify-center mb-4">
                           <Search className="text-[#94a3b8]" size={24} />
@@ -6924,8 +6931,22 @@ const Bills = () => {
                       <td className="px-3 py-2.5 whitespace-nowrap text-xs font-bold text-gray-900 text-right border-r border-gray-100">
                         {bill.amount}
                       </td>
-                      <td className="px-3 py-2.5 whitespace-nowrap text-xs font-bold text-gray-900 text-right">
+                      <td className="px-3 py-2.5 whitespace-nowrap text-xs text-gray-700 text-right border-r border-gray-100">
+                        {bill.paid}
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap text-xs font-bold text-gray-900 text-right border-r border-gray-100">
                         {bill.balanceDue}
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap text-xs">
+                        {bill.originalStatus === "draft" || bill.originalStatus === "cancelled" ? <span className="text-gray-400">—</span> : (
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                            bill.paymentStatus === "paid" ? "bg-[#dcfce7] text-[#15803d]"
+                              : bill.paymentStatus === "overdue" ? "bg-[#fee2e2] text-[#dc2626]"
+                              : bill.paymentStatus === "partially_paid" ? "bg-[#fef3c7] text-[#b45309]"
+                              : "bg-[#f1f5f9] text-[#475569]"}`}>
+                            {bill.paymentStatus === "paid" ? "Paid" : bill.paymentStatus === "overdue" ? "Overdue" : bill.paymentStatus === "partially_paid" ? "Part paid" : "Unpaid"}
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))

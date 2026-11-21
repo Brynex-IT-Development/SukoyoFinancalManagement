@@ -39,7 +39,40 @@ export const postMoneyIn = async ({ invoiceNo, category, subCategory = "", amoun
   return tx;
 };
 
-/** Remove an entry made by postMoneyIn (used to roll back when a later step fails). */
+/**
+ * Money paid out (vendor payments, F9). Shaped like an expense from DirectIndirectExpenses:
+ * type "Expense" with NEGATIVE amount and payment column. A cheque is recorded under bank.
+ * Category "Vendor Payment" lets reports tell it apart from running expenses.
+ */
+export const postMoneyOut = async ({ invoiceNo, category, subCategory = "", amount, mode, locCode, remark = "", customerName = "", date }) => {
+  const column = mode === "cheque" ? "bank" : mode;
+  if (!MONEY_MODES.includes(column)) throw new Error(`Unknown payment mode "${mode}"`);
+  const amt = round2(amount);
+  const day = date ? new Date(`${istDateString(date)}T00:00:00.000Z`) : todayForDaybook();
+  const money = { cash: "0", bank: "0", upi: "0" };
+  money[column] = String(-amt);
+  const tx = await Transaction.create({
+    type: "Expense",
+    invoiceNo,
+    category,
+    subCategory,
+    remark,
+    billValue: amt,
+    amount: String(-amt),
+    ...money,
+    rbl: "0",
+    paymentMethod: column,
+    date: day,
+    locCode: locCode || "001",
+    quantity: "1",
+    customerName,
+    totalTransaction: -amt,
+  });
+  if (column === "cash") await propagateCashDiff(tx.locCode, day, -amt, true);
+  return tx;
+};
+
+/** Remove an entry made by postMoneyIn / postMoneyOut (rollback, or a payment being deleted). */
 export const removeMoneyIn = async (tx) => {
   if (!tx) return;
   await Transaction.deleteOne({ _id: tx._id });

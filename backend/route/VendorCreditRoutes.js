@@ -19,12 +19,7 @@ router
   .get(getVendorCredits)
   .post(createVendorCredit);
 
-router
-  .route("/purchase/vendor-credits/:id")
-  .get(getVendorCreditById)
-  .put(updateVendorCredit)
-  .delete(deleteVendorCredit);
-
+// Fixed paths must come before /:id, or "available" is taken as an id
 router
   .route("/purchase/vendor-credits/available")
   .get(getAvailableVendorCredits);
@@ -32,6 +27,13 @@ router
 router
   .route("/purchase/vendor-credits/apply-to-bill")
   .post(applyCreditToBill);
+
+router
+  .route("/purchase/vendor-credits/:id")
+  .get(getVendorCreditById)
+  .put(updateVendorCredit)
+  .delete(deleteVendorCredit);
+
 
 export default router;
 

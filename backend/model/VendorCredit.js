@@ -71,6 +71,18 @@ const vendorCreditSchema = new mongoose.Schema(
     
     // Status
     status: { type: String, default: "draft" }, // "draft", "open", "cancelled"
+
+    // Credit usage. The controller has always written these, but they were not declared, so
+    // Mongoose dropped them. Missing on older credits: unused = finalTotal − appliedCredit.
+    unusedCredit: { type: Number },
+    appliedCredit: { type: Number, default: 0 },
+    appliedToBills: [{
+      _id: false,
+      billId: { type: mongoose.Schema.Types.ObjectId, ref: "Bill" },
+      billNumber: String,
+      appliedAmount: Number,
+      appliedDate: Date,
+    }],
   },
   { timestamps: true }
 );

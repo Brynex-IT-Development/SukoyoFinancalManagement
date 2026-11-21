@@ -98,6 +98,26 @@ const billSchema = new mongoose.Schema(
     
     // Status
     status: { type: String, default: "draft" }, // "draft", "sent", "paid", "cancelled"
+
+    // ── Payments (F9). balanceDue = finalTotal − amountPaid − creditsApplied (see utils/payables.js).
+    // Older bills without these fields count as fully unpaid. Only ever changed with atomic $inc.
+    amountPaid: { type: Number, default: 0 },
+    creditsApplied: { type: Number, default: 0 },
+    payments: [{
+      _id: false,
+      paymentId: { type: mongoose.Schema.Types.ObjectId, ref: "VendorPayment" },
+      paymentNumber: String,
+      amount: Number,
+      date: Date,
+    }],
+    // Vendor credits applied to this bill (VendorCreditController.applyCreditToBill)
+    appliedCredits: [{
+      _id: false,
+      creditId: { type: mongoose.Schema.Types.ObjectId, ref: "VendorCredit" },
+      creditNoteNumber: String,
+      appliedAmount: Number,
+      appliedDate: Date,
+    }],
   },
   { timestamps: true }
 );
@@ -106,6 +126,7 @@ const billSchema = new mongoose.Schema(
 billSchema.index({ userId: 1, billDate: -1 });
 billSchema.index({ locCode: 1, billDate: -1 });
 billSchema.index({ status: 1, billDate: -1 });
+billSchema.index({ vendorId: 1, billDate: 1 });
 
 const Bill = mongoose.model("Bill", billSchema);
 export default Bill;

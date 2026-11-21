@@ -81,6 +81,8 @@ import PurchaseReceiveDetail from "./pages/PurchaseReceiveDetail.jsx";
 import Bills from "./pages/Bills.jsx";
 import BillDetail from "./pages/BillDetail.jsx";
 import PaymentsMade from "./pages/PaymentsMade.jsx";
+import VendorPaymentCreate from "./pages/VendorPaymentCreate.jsx";
+import VendorPaymentDetail from "./pages/VendorPaymentDetail.jsx";
 import VendorCredits from "./pages/VendorCredits.jsx";
 import VendorCreditDetail from "./pages/VendorCreditDetail.jsx";
 import SalesReport from "./pages/SalesReport.jsx";
@@ -286,6 +288,8 @@ const App = () => {
           <Route path="/purchase/bills/:id" element={currentuser ? <BillDetail /> : <Navigate to="/login" />} />
           <Route path="/purchase/bills" element={currentuser ? <Bills /> : <Navigate to="/login" />} />
           <Route path="/purchase/payments" element={currentuser ? <PaymentsMade /> : <Navigate to="/login" />} />
+          <Route path="/purchase/payments/new" element={currentuser ? <VendorPaymentCreate /> : <Navigate to="/login" />} />
+          <Route path="/purchase/payments/:id" element={currentuser ? <VendorPaymentDetail /> : <Navigate to="/login" />} />
           <Route path="/purchase/vendor-credits/new" element={currentuser ? <VendorCredits /> : <Navigate to="/login" />} />
           <Route path="/purchase/vendor-credits/:id/edit" element={currentuser ? <VendorCredits /> : <Navigate to="/login" />} />
           <Route path="/purchase/vendor-credits/:id" element={currentuser ? <VendorCreditDetail /> : <Navigate to="/login" />} />

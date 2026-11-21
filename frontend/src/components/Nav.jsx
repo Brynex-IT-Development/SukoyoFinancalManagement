@@ -297,6 +297,7 @@ const Nav = () => {
         { to: "/purchase/orders", label: "Purchase Orders", Icon: ClipboardList },
         { to: "/purchase/receives", label: "Purchase Receives", Icon: PackageCheck },
         { to: "/purchase/bills", label: "Bills", Icon: ReceiptText },
+        { to: "/purchase/payments", label: "Payments Made", Icon: Wallet },
         { to: "/purchase/vendor-credits", label: "Purchase Return", Icon: ReceiptText },
         { to: "/purchase/vendors", label: "Vendors", Icon: Users },
     ];

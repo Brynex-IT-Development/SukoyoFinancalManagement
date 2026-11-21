@@ -1,6 +1,8 @@
 import VendorCredit from "../model/VendorCredit.js";
 import Vendor from "../model/Vendor.js";
 import Bill from "../model/Bill.js";
+import { addToBill } from "../utils/billPayments.js";
+import { withPaymentInfo } from "../utils/payables.js";
 import { nextCreditNote } from "../utils/nextCreditNote.js";
 import Counter from "../model/Counter.js";
 import ShoeItem from "../model/ShoeItem.js";
@@ -722,19 +724,20 @@ export const getAvailableVendorCredits = async (req, res) => {
     
     const credits = await VendorCredit.find(query).sort({ creditDate: 1 });
     
+    // Older credits never stored unusedCredit: unused = finalTotal − appliedCredit
+    const unusedOf = (c) => (c.unusedCredit !== undefined && c.unusedCredit !== null
+      ? parseFloat(c.unusedCredit) || 0
+      : (parseFloat(c.finalTotal) || 0) - (parseFloat(c.appliedCredit) || 0));
     const availableCredits = credits
       .map(formatVendorCredit)
-      .filter(credit => {
-        const unused = parseFloat(credit.unusedCredit) || 0;
-        return unused > 0;
-      })
+      .filter(credit => unusedOf(credit) > 0.004)
       .map(credit => ({
         id: credit.id,
         _id: credit._id,
         creditNoteNumber: credit.creditNoteNumber,
         creditDate: credit.creditDate,
         finalTotal: parseFloat(credit.finalTotal) || 0,
-        unusedCredit: parseFloat(credit.unusedCredit) || 0,
+        unusedCredit: Math.round(unusedOf(credit) * 100) / 100,
         appliedCredit: parseFloat(credit.appliedCredit) || 0,
       }));
     
@@ -745,80 +748,79 @@ export const getAvailableVendorCredits = async (req, res) => {
   }
 };
 
-// Apply vendor credit to a bill
+// Apply vendor credit to a bill.
+// F9: the bill keeps its total; the credit goes into bill.creditsApplied (balance = total −
+// paid − credits). Both sides are conditional atomic updates: the credit must have enough
+// unused amount and the bill enough balance; if the bill side fails the credit is put back.
 export const applyCreditToBill = async (req, res) => {
   try {
     const { creditId, billId, appliedAmount } = req.body;
-    
+
     if (!creditId || !billId || !appliedAmount) {
       return res.status(400).json({ message: "Credit ID, Bill ID, and applied amount are required" });
     }
-    
-    const amount = parseFloat(appliedAmount);
-    if (amount <= 0) {
+
+    const amount = Math.round((parseFloat(appliedAmount) + Number.EPSILON) * 100) / 100;
+    if (!(amount > 0)) {
       return res.status(400).json({ message: "Applied amount must be greater than 0" });
     }
-    
-    const vendorCredit = await VendorCredit.findById(creditId);
+
+    const vendorCredit = await VendorCredit.findById(creditId).lean();
     if (!vendorCredit) {
       return res.status(404).json({ message: "Vendor credit not found" });
     }
-    
     if (vendorCredit.status !== "open") {
       return res.status(400).json({ message: "Only open vendor credits can be applied to bills" });
     }
-    
-    const unusedCredit = parseFloat(vendorCredit.unusedCredit) || 0;
-    if (amount > unusedCredit) {
-      return res.status(400).json({ 
-        message: `Applied amount (${amount}) exceeds unused credit (${unusedCredit})` 
-      });
-    }
-    
-    const bill = await Bill.findById(billId);
+    const bill = await Bill.findById(billId).lean();
     if (!bill) {
       return res.status(404).json({ message: "Bill not found" });
     }
-    
-    const newUnusedCredit = unusedCredit - amount;
-    const newAppliedCredit = (parseFloat(vendorCredit.appliedCredit) || 0) + amount;
-    
-    if (!vendorCredit.appliedToBills) {
-      vendorCredit.appliedToBills = [];
+    if (vendorCredit.vendorId && bill.vendorId && String(vendorCredit.vendorId) !== String(bill.vendorId)) {
+      return res.status(400).json({ message: "This credit belongs to a different vendor than the bill" });
     }
-    vendorCredit.appliedToBills.push({
-      billId: billId,
-      billNumber: bill.billNumber,
-      appliedAmount: amount,
-      appliedDate: new Date(),
-    });
-    vendorCredit.unusedCredit = newUnusedCredit;
-    vendorCredit.appliedCredit = newAppliedCredit;
-    await vendorCredit.save();
-    
-    const billFinalTotal = parseFloat(bill.finalTotal) || 0;
-    bill.finalTotal = Math.max(0, billFinalTotal - amount);
-    
-    if (!bill.appliedCredits) {
-      bill.appliedCredits = [];
+
+    // Older credits never stored unusedCredit: unused = finalTotal − appliedCredit
+    const UNUSED = { $ifNull: ["$unusedCredit", { $subtract: ["$finalTotal", { $ifNull: ["$appliedCredit", 0] }] }] };
+    const entry = { billId: bill._id, billNumber: bill.billNumber, appliedAmount: amount, appliedDate: new Date() };
+    const took = await VendorCredit.updateOne(
+      { _id: vendorCredit._id, status: "open", $expr: { $gte: [UNUSED, amount - 0.004] } },
+      [{ $set: {
+        unusedCredit: { $round: [{ $subtract: [UNUSED, amount] }, 2] },
+        appliedCredit: { $round: [{ $add: [{ $ifNull: ["$appliedCredit", 0] }, amount] }, 2] },
+        appliedToBills: { $concatArrays: [{ $ifNull: ["$appliedToBills", []] }, [entry]] },
+      } }]
+    );
+    if (!took.modifiedCount) {
+      const unused = vendorCredit.unusedCredit ?? ((parseFloat(vendorCredit.finalTotal) || 0) - (parseFloat(vendorCredit.appliedCredit) || 0));
+      return res.status(400).json({ message: `Applied amount (${amount}) exceeds unused credit (${Math.round(unused * 100) / 100})` });
     }
-    bill.appliedCredits.push({
-      creditId: creditId,
-      creditNoteNumber: vendorCredit.creditNoteNumber,
-      appliedAmount: amount,
-      appliedDate: new Date(),
+
+    const updatedBill = await addToBill({
+      billId: bill._id, field: "creditsApplied", amount,
+      push: { appliedCredits: { creditId: vendorCredit._id, creditNoteNumber: vendorCredit.creditNoteNumber, appliedAmount: amount, appliedDate: entry.appliedDate } },
     });
-    
-    await bill.save();
-    
+    if (!updatedBill) {
+      // Bill balance too small (or bill not payable): give the credit back
+      await VendorCredit.updateOne({ _id: vendorCredit._id }, [{ $set: {
+        unusedCredit: { $round: [{ $add: ["$unusedCredit", amount] }, 2] },
+        appliedCredit: { $round: [{ $subtract: ["$appliedCredit", amount] }, 2] },
+        // remove exactly the entry added above
+        appliedToBills: { $filter: { input: "$appliedToBills", cond: { $not: [{ $and: [{ $eq: ["$$this.billId", bill._id] }, { $eq: ["$$this.appliedDate", entry.appliedDate] }] }] } } },
+      } }]);
+      const balance = (parseFloat(bill.finalTotal) || 0) - (parseFloat(bill.amountPaid) || 0) - (parseFloat(bill.creditsApplied) || 0);
+      return res.status(400).json({ message: `Bill ${bill.billNumber} has only ₹${(Math.round(balance * 100) / 100).toFixed(2)} due, less than the ₹${amount.toFixed(2)} credit.` });
+    }
+
     if (vendorCredit.vendorId) {
       await updateVendorBalance(vendorCredit.vendorId, amount, 'subtract');
     }
-    
+
+    const freshCredit = await VendorCredit.findById(vendorCredit._id);
     res.status(200).json({
       message: "Credit applied to bill successfully",
-      vendorCredit: formatVendorCredit(vendorCredit),
-      bill: bill,
+      vendorCredit: formatVendorCredit(freshCredit),
+      bill: withPaymentInfo(updatedBill),
     });
   } catch (error) {
     console.error("Apply credit to bill error:", error);
