@@ -83,6 +83,9 @@ import BillDetail from "./pages/BillDetail.jsx";
 import PaymentsMade from "./pages/PaymentsMade.jsx";
 import VendorPaymentCreate from "./pages/VendorPaymentCreate.jsx";
 import VendorPaymentDetail from "./pages/VendorPaymentDetail.jsx";
+import VendorOutstanding from "./pages/VendorOutstanding.jsx";
+import VendorAging from "./pages/VendorAging.jsx";
+import VendorStatement from "./pages/VendorStatement.jsx";
 import VendorCredits from "./pages/VendorCredits.jsx";
 import VendorCreditDetail from "./pages/VendorCreditDetail.jsx";
 import SalesReport from "./pages/SalesReport.jsx";
@@ -305,6 +308,9 @@ const App = () => {
           <Route path="/reports/sales" element={currentuser ? <SalesReport /> : <Navigate to="/login" />} />
           <Route path="/reports/inventory" element={currentuser ? <InventoryReport /> : <Navigate to="/login" />} />
           <Route path="/reports/aging" element={currentuser ? <InventoryAgingReport /> : <Navigate to="/login" />} />
+          <Route path="/reports/vendor-outstanding" element={currentuser ? <VendorOutstanding /> : <Navigate to="/login" />} />
+          <Route path="/reports/vendor-aging" element={currentuser ? <VendorAging /> : <Navigate to="/login" />} />
+          <Route path="/reports/vendor-statement" element={currentuser ? <VendorStatement /> : <Navigate to="/login" />} />
           <Route path="/reports/income-expense" element={currentuser ? <IncomeExpenseReport /> : <Navigate to="/login" />} />
           
           {/* Reorder Alerts */}

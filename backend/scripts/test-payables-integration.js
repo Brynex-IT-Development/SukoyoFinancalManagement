@@ -11,6 +11,7 @@ import VendorCredit from "../model/VendorCredit.js";
 import VendorPayment from "../model/VendorPayment.js";
 import Transaction from "../model/Transaction.js";
 import { listVendorPayments, getOpenBills, createVendorPayment, getVendorPayment, deleteVendorPayment } from "../controllers/VendorPaymentController.js";
+import { vendorOutstanding, vendorBills, vendorAging, vendorStatement } from "../controllers/VendorReportController.js";
 import { getBills, getBillById, updateBill, deleteBill } from "../controllers/BillController.js";
 import { applyCreditToBill, getAvailableVendorCredits } from "../controllers/VendorCreditController.js";
 import { istDateString } from "../utils/ist.js";
@@ -139,6 +140,47 @@ eq("payment list search by reference", r.body.payments.map((p) => p.amount), [10
 r = await call(getVendorPayment, { params: { id: String(r.body.payments[0]._id) }, query: { userId: ADMIN } });
 eq("payment detail includes bill balances", [r.body.bills?.[0]?.billNumber, r.body.bills?.[0]?.balanceDue], ["B1", 0]);
 
+// ── Outstanding: Acme billed 20,000 (B1 10k + B2 5k + B3 2k + B9 3k), paid 12,000 (B1 10k + B2 2k), credits 1,000
+r = await call(vendorOutstanding, { query: { userId: ADMIN } });
+const acmeRow = r.body.rows.find((x) => x.vendorName === "Acme Gold");
+eq("outstanding row", [acmeRow.billCount, acmeRow.billed, acmeRow.paid, acmeRow.creditsApplied, acmeRow.outstanding, acmeRow.percentPaid, acmeRow.status],
+  [4, 20000, 12000, 1000, 7000, 60, "Partially paid"]);
+eq("name-only older bill grouped by name", r.body.rows.some((x) => x.vendorName === "Old Traders" && x.outstanding === 800), true);
+r = await call(vendorOutstanding, { query: { userId: ADMIN, show: "paid" } });
+eq("filter: paid only", r.body.rows.length, 0);
+r = await call(vendorOutstanding, { query: { userId: STAFF } });
+eq("store user: outstanding excludes other stores", r.body.rows.find((x) => x.vendorName === "Acme Gold").billed, 17000);
+// Store filter: locCode, and an older bill with no locCode matches by its warehouse name
+const legacy = await Bill.create({ vendorName: "Gamma Gems", vendorId: null, billNumber: "LEG1", billDate: daysAgo(5), finalTotal: 400, status: "open", sourceType: "from_receive", userId: ADMIN, warehouse: "Store Two" });
+await Bill.updateOne({ _id: legacy._id }, { $unset: { locCode: 1 } });
+r = await call(vendorOutstanding, { query: { userId: ADMIN, locCode: "T02", warehouse: "Store Two" } });
+eq("store filter: T02 by locCode + older bill by warehouse name", r.body.rows.map((x) => [x.vendorName, x.billed]).sort(), [["Acme Gold", 3000], ["Gamma Gems", 400]]);
+r = await call(vendorOutstanding, { query: { userId: ADMIN, locCode: "T01", warehouse: "Store One" } });
+eq("store filter: T01 leaves out T02 and the Store Two older bill", r.body.rows.some((x) => x.vendorName === "Gamma Gems") || r.body.rows.find((x) => x.vendorName === "Acme Gold").billed !== 17000, false);
+await Bill.deleteOne({ _id: legacy._id });
+r = await call(vendorBills, { query: { userId: ADMIN, vendorKey: `id:${A}` } });
+eq("drill-down lists the vendor's bills", r.body.bills.length, 4);
+
+// ── Aging (as of today): B2 ₹2,000 left (PAY-1 deleted) 10 days overdue, B3 not due (₹2,000), B9 170 days (₹3,000),
+//    Beta X1 has no due date → bill date + 30 → not due, OLD1 370 days
+r = await call(vendorAging, { query: { userId: ADMIN } });
+const ag = Object.fromEntries(r.body.rows.map((x) => [x.vendorName, x]));
+eq("aging: Acme buckets", [ag["Acme Gold"].notDue, ag["Acme Gold"].d91_180, ag["Acme Gold"].d1_30, ag["Acme Gold"].total], [2000, 3000, 2000, 7000]);
+eq("aging: no due date → bill date + 30 (Beta not due yet)", ag["Beta Silver"].notDue, 1500);
+eq("aging: 180+ bucket", ag["Old Traders"].d180p, 800);
+eq("aging totals row", [r.body.totals.total, r.body.totals.bills], [9300, 5]);
+
+// ── Statement for Acme (all stores, admin): from 50 days ago → opening = B1 10,000 (70 days ago) + B9 3,000 (200 days ago)
+r = await call(vendorStatement, { query: { userId: ADMIN, vendorKey: `id:${A}`, fromDate: ymd(daysAgo(50)), toDate: ymd(new Date()) } });
+eq("statement opening balance", r.body.opening, 13000);
+eq("statement entries", r.body.entries.map((e) => `${e.type}:${e.ref}`), ["Bill:B2", "Bill:B3", "Vendor credit:CN-1", "Payment:PAY-000002", "Payment:PAY-000004"]);
+eq("statement closing = opening + debits − credits", [r.body.totalDebit, r.body.totalCredit, r.body.closing], [7000, 13500, 6500]); // = outstanding 7,000 − unused credit 500
+r = await call(vendorStatement, { query: { userId: STAFF, vendorKey: `id:${A}`, fromDate: ymd(daysAgo(50)), toDate: ymd(new Date()) } });
+eq("store user statement leaves out other stores (opening 10,000)", r.body.opening, 10000);
+r = await call(vendorStatement, { query: { userId: ADMIN, vendorKey: `id:${A}`, fromDate: ymd(daysAgo(50)), toDate: ymd(new Date()) } });
+eq("statement vendor + GSTIN", [r.body.vendorName, r.body.gstin], ["Acme Gold", "27AAPFU0939F1ZV"]);
+
+await new Promise((res) => setTimeout(res, 300));
 await mongoose.disconnect();
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nAll payables integration checks passed");
 process.exit(failed ? 1 : 0);
