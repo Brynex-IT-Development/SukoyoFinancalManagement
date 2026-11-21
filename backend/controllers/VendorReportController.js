@@ -33,7 +33,7 @@ const loadBills = async (who, q, extra = {}) => {
   return bills.map((b) => ({ ...b, vendorKey: vendorKeyOf(b) }));
 };
 
-const vendorOptions = (bills) => {
+export const vendorOptions = (bills) => {
   const m = new Map();
   for (const b of bills) if (!m.has(b.vendorKey)) m.set(b.vendorKey, { vendorKey: b.vendorKey, vendorId: b.vendorId || null, vendorName: b.vendorName });
   return [...m.values()].sort((a, b) => String(a.vendorName).localeCompare(String(b.vendorName)));

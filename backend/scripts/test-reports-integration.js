@@ -8,6 +8,7 @@ import User from "../model/UserModel.js";
 import Store from "../model/Store.js";
 import { profitAndLoss, profitStock } from "../controllers/ProfitLossController.js";
 import { billWiseProfit, billProfitDetail } from "../controllers/BillProfitController.js";
+import { purchaseSummary, purchasesByItemVendor, gstPurchaseRegister } from "../controllers/PurchaseReportController.js";
 import { istDateString } from "../utils/ist.js";
 
 const uri = process.env.TEST_MONGODB_URI || "";
@@ -163,6 +164,52 @@ eq("bill profit detail: rebuilt from its return", [r.body.rebuilt, r.body.return
 const inv5 = await db.collection("salesinvoices").findOne({ invoiceNumber: "INV-5" });
 r = await call(billProfitDetail, { params: { id: String(inv5._id) }, query: { userId: STAFF } });
 eq("bill profit detail: another store's invoice → 403", r.status, 403);
+
+// ═══ F13 Purchase reports ═══
+const acmeV = new mongoose.Types.ObjectId(), plainV = new mongoose.Types.ObjectId();
+await db.collection("vendors").insertMany([
+  { _id: acmeV, displayName: "Acme Gold Pvt", gstin: "32ABCDE1234F1Z5", userId: ADMIN },
+  { _id: plainV, displayName: "Plain Traders", gstin: "", userId: ADMIN },
+]);
+const pbill = (o) => ({ status: "open", userId: ADMIN, amountPaid: 0, creditsApplied: 0, ...o });
+await db.collection("bills").insertMany([
+  // P-1 Acme (GSTIN) at Store One: Ring 2 × ₹1,050 at 5% + Chain 1 × ₹1,180 at 18%; ₹1,000 paid
+  pbill({ vendorName: "Acme Gold Pvt", vendorId: String(acmeV), billNumber: "P-1", billDate: daysAgo(8), locCode: "T01", warehouse: "Store One", subTotal: 3280, finalTotal: 3280, amountPaid: 1000,
+    items: [{ itemId: itemR, itemName: "Ring", quantity: 2, rate: 1050, baseAmount: 2000, cgstAmount: 50, sgstAmount: 50, taxPercent: 5 },
+      { itemId: itemC, itemName: "Chain", quantity: 1, rate: 1180, baseAmount: 1000, cgstAmount: 90, sgstAmount: 90, taxPercent: 18 }] }),
+  // P-2 a vendor without GSTIN: Ring 3 × ₹1,100 at 5%
+  pbill({ vendorName: "Plain Traders", vendorId: String(plainV), billNumber: "P-2", billDate: daysAgo(7), locCode: "T01", warehouse: "Store One", subTotal: 3300, finalTotal: 3300,
+    items: [{ itemId: itemR, itemName: "Ring", quantity: 3, rate: 1100, baseAmount: 3142.86, cgstAmount: 78.57, sgstAmount: 78.57, taxPercent: 5 }] }),
+  // P-3 Acme at Store Two, inter-state: Ring 1 × ₹1,030 at 3% IGST
+  pbill({ vendorName: "Acme Gold Pvt", vendorId: String(acmeV), billNumber: "P-3", billDate: daysAgo(6), locCode: "T02", warehouse: "Store Two", subTotal: 1030, finalTotal: 1030,
+    items: [{ itemId: itemR, itemName: "Ring", quantity: 1, rate: 1030, baseAmount: 1000, igstAmount: 30, taxPercent: 3, isInterState: true }] }),
+]);
+// Summary (admin): B-1 11,800 + P-1 3,280 + P-2 3,300 + P-3 1,030 = 19,410; tax 1,800 + 280 + 157.14 + 30 = 2,267.14; paid 1,000
+r = await call(purchaseSummary, { query: { userId: ADMIN, fromDate: FROM, toDate: TO } });
+eq("purchase summary: one row per bill, oldest first (draft left out)", r.body.rows.map((x) => x.billNumber), ["P-1", "P-2", "B-1", "P-3"]);
+eq("purchase summary: P-1 items / qty / sub-total / tax / total / paid / balance", pick(r.body.rows.find((x) => x.billNumber === "P-1"), ["items", "qty", "subTotal", "tax", "total", "paid", "balance", "paymentStatus"]), [2, 3, 3280, 280, 3280, 1000, 2280, "partially_paid"]);
+eq("purchase summary: totals", pick(r.body.totals, ["bills", "total", "tax", "paid", "balance"]), [4, 19410, 2267.14, 1000, 18410]);
+r = await call(purchaseSummary, { query: { userId: ADMIN, fromDate: FROM, toDate: TO, vendorKey: `id:${acmeV}` } });
+eq("purchase summary: vendor filter", r.body.rows.map((x) => x.billNumber), ["P-1", "P-3"]);
+r = await call(purchaseSummary, { query: { userId: STAFF, fromDate: FROM, toDate: TO } });
+eq("purchase summary: store user sees only their store", r.body.rows.map((x) => x.billNumber), ["P-1", "P-2", "B-1"]);
+// Item × vendor: Ring from Acme 3 pcs for 2,100 + 1,030 = 3,130 (avg 1,043.33); Ring from Plain 3 for 3,300 (avg 1,100)
+r = await call(purchasesByItemVendor, { query: { userId: ADMIN, fromDate: FROM, toDate: TO } });
+const ivBy = Object.fromEntries(r.body.rows.map((x) => [`${x.itemName}|${x.vendorName}`, x]));
+eq("items by vendor: Ring from Acme", pick(ivBy["Ring|Acme Gold Pvt"], ["qty", "value", "averageRate", "bills"]), [3, 3130, 1043.33, 2]);
+eq("items by vendor: Ring from Plain Traders", pick(ivBy["Ring|Plain Traders"], ["qty", "value", "averageRate"]), [3, 3300, 1100]);
+r = await call(purchasesByItemVendor, { query: { userId: ADMIN, fromDate: FROM, toDate: TO, search: "chain" } });
+eq("items by vendor: search", r.body.rows.map((x) => [x.itemName, x.vendorName, x.qty]), [["Chain", "Acme Gold Pvt", 1]]);
+// GST register: only Acme has a GSTIN → P-1 at 5% and 18%, P-3 at 3%; B-1 (no vendor record) and P-2 skipped
+r = await call(gstPurchaseRegister, { query: { userId: ADMIN, fromDate: FROM, toDate: TO } });
+eq("GST register: rows per bill per rate from stored tax", r.body.rows.map((x) => [x.billNumber, x.vendorGstin, x.rate, x.taxable, x.cgst, x.sgst, x.igst, x.cess, x.total]),
+  [["P-1", "32ABCDE1234F1Z5", 5, 2000, 50, 50, 0, 0, 2100], ["P-1", "32ABCDE1234F1Z5", 18, 1000, 90, 90, 0, 0, 1180], ["P-3", "32ABCDE1234F1Z5", 3, 1000, 0, 0, 30, 0, 1030]]);
+eq("GST register: distinct rates and skipped bills", [r.body.rates, r.body.skippedNoGstin], [[3, 5, 18], 2]);
+eq("GST register: totals", pick(r.body.totals, ["taxable", "cgst", "sgst", "igst", "total"]), [4000, 140, 140, 30, 4310]);
+r = await call(gstPurchaseRegister, { query: { userId: ADMIN, fromDate: FROM, toDate: TO, rate: "18" } });
+eq("GST register: rate filter", r.body.rows.map((x) => [x.billNumber, x.rate]), [["P-1", 18]]);
+r = await call(gstPurchaseRegister, { query: { userId: STAFF, fromDate: FROM, toDate: TO } });
+eq("GST register: store user sees only their store", r.body.rows.map((x) => x.billNumber), ["P-1", "P-1"]);
 
 // ═══ (later features add their checks above this line) ═══
 
