@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { useReactToPrint } from "react-to-print";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   Printer,
@@ -22,6 +23,7 @@ import {
 import baseUrl from "../api/api";
 import { redemptionLabel } from "../utils/retailApi";
 import useCompanyProfile, { companyAddressLine } from "../hooks/useCompanyProfile";
+import TaxInvoicePrint from "../components/invoice/TaxInvoicePrint";
 import { stateName as gstStateName } from "../utils/gst";
 import useSidebar from "../hooks/useSidebar";
 import Header from "../components/Header";
@@ -47,8 +49,10 @@ const SalesInvoiceDetail = () => {
   const [returnReason, setReturnReason] = useState("");
   const [returnPaymentMethod, setReturnPaymentMethod] = useState("Cash");
   const [returningInvoice, setReturningInvoice] = useState(false);
-  // Company profile (F7) for the header / bank details
+  // Company profile (F7) for the header / bank details; GST tax invoice print for business invoices (F8)
   const company = useCompanyProfile();
+  const taxInvoiceRef = useRef(null);
+  const printTaxInvoice = useReactToPrint({ contentRef: taxInvoiceRef, documentTitle: () => `Tax invoice ${invoice?.invoiceNumber || ""}` });
   // Refund as cash (current behaviour) or as store credit; preview of the split comes from the server
   const [refundMode, setRefundMode] = useState("cash");
   const [refundPreview, setRefundPreview] = useState(null);
@@ -340,6 +344,7 @@ const SalesInvoiceDetail = () => {
   }, [showReturnModal, returnItems, refundMode, invoice?._id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePrint = () => {
+    if (invoice?.isB2B && invoice?.gstLines?.length) { printTaxInvoice(); return; }
     window.print();
   };
 
@@ -1104,8 +1109,15 @@ const SalesInvoiceDetail = () => {
                       Bill To
                     </span>
                     <div className="text-base font-bold text-[#111827]">
-                      {invoice.customer || "Walk-in Customer"}
+                      {invoice.isB2B ? (invoice.buyerLegalName || invoice.customer) : (invoice.customer || "Walk-in Customer")}
                     </div>
+                    {invoice.isB2B && (
+                      <div className="text-xs text-[#4B5563] mt-1 space-y-0.5">
+                        {invoice.buyerTradeName && invoice.buyerTradeName !== invoice.buyerLegalName && <div>{invoice.buyerTradeName}</div>}
+                        {invoice.buyerAddress && <div>{invoice.buyerAddress}</div>}
+                        <div className="font-mono font-bold text-[#111827]">GSTIN: {invoice.buyerGstin}</div>
+                      </div>
+                    )}
                     {invoice.customerPhone && (
                       <div className="text-xs text-[#4B5563] mt-1 font-medium flex items-center gap-1.5">
                         <Phone size={12} className="text-[#6B7280]" />
@@ -1288,15 +1300,34 @@ const SalesInvoiceDetail = () => {
                       </div>
                     )}
 
-                    <div className="flex justify-between text-xs py-1 text-[#4B5563]">
-                      <span className="font-medium">CGST @ 2.5%</span>
-                      <span className="font-semibold text-[#111827]">{formatCurrency(displayTotalTax / 2)}</span>
-                    </div>
+                    {invoice.isB2B && invoice.taxBreakup ? (
+                      <>
+                        <div className="flex justify-between text-xs py-1 text-[#4B5563]">
+                          <span className="font-medium">Taxable value</span>
+                          <span className="font-semibold text-[#111827]">{formatCurrency(invoice.taxBreakup.taxable)}</span>
+                        </div>
+                        {invoice.taxBreakup.intra ? (
+                          <>
+                            <div className="flex justify-between text-xs py-1 text-[#4B5563]"><span className="font-medium">CGST</span><span className="font-semibold text-[#111827]">{formatCurrency(invoice.taxBreakup.cgst)}</span></div>
+                            <div className="flex justify-between text-xs py-1 text-[#4B5563]"><span className="font-medium">SGST</span><span className="font-semibold text-[#111827]">{formatCurrency(invoice.taxBreakup.sgst)}</span></div>
+                          </>
+                        ) : (
+                          <div className="flex justify-between text-xs py-1 text-[#4B5563]"><span className="font-medium">IGST</span><span className="font-semibold text-[#111827]">{formatCurrency(invoice.taxBreakup.igst)}</span></div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex justify-between text-xs py-1 text-[#4B5563]">
+                          <span className="font-medium">CGST @ 2.5%</span>
+                          <span className="font-semibold text-[#111827]">{formatCurrency(displayTotalTax / 2)}</span>
+                        </div>
 
-                    <div className="flex justify-between text-xs py-1 text-[#4B5563]">
-                      <span className="font-medium">SGST @ 2.5%</span>
-                      <span className="font-semibold text-[#111827]">{formatCurrency(displayTotalTax / 2)}</span>
-                    </div>
+                        <div className="flex justify-between text-xs py-1 text-[#4B5563]">
+                          <span className="font-medium">SGST @ 2.5%</span>
+                          <span className="font-semibold text-[#111827]">{formatCurrency(displayTotalTax / 2)}</span>
+                        </div>
+                      </>
+                    )}
 
                     {invoice.tdsTcsAmount > 0 && (
                       <div className="flex justify-between text-xs py-1 text-red-600">
@@ -1413,6 +1444,13 @@ const SalesInvoiceDetail = () => {
             </div>
           </div>
         </div>
+
+        {/* GST tax invoice layout for business invoices (printed by the Print button) */}
+        {invoice?.isB2B && (
+          <div style={{ display: "none" }}>
+            <TaxInvoicePrint ref={taxInvoiceRef} invoice={invoice} company={company} />
+          </div>
+        )}
 
         {/* ── RETURN INVOICE MODAL ── */}
         {showReturnModal && (

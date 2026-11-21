@@ -1,4 +1,5 @@
 import CompanyProfile from "../model/CompanyProfile.js";
+import BusinessCustomer from "../model/BusinessCustomer.js";
 import { requireUser } from "../utils/userScope.js";
 import { validateGstin, isValidStateCode, stateName, PAN_RE, IFSC_RE, GST_STATES } from "../utils/gst.js";
 
@@ -59,4 +60,29 @@ export const saveCompanyProfile = async (req, res) => {
     const profile = await CompanyProfile.findOneAndUpdate({ key: "default" }, { $set: data, $setOnInsert: { key: "default" } }, { upsert: true, new: true }).lean();
     res.json({ profile });
   } catch (err) { serverError(res, err, "Save company profile"); }
+};
+
+// GET /api/gst/gstin/:gstin?userId= — offline validation + the saved business for this GSTIN (if billed before)
+export const lookupGstin = async (req, res) => {
+  try {
+    const who = await requireUser(req, res);
+    if (!who) return;
+    const v = validateGstin(req.params.gstin);
+    if (!v.valid) return res.status(400).json({ ...v, message: v.error });
+    const business = await BusinessCustomer.findOne({ gstin: v.gstin }).lean();
+    const company = await CompanyProfile.findOne({ key: "default" }).select("stateCode gstin").lean();
+    res.json({ ...v, business: business || null, intra: company?.stateCode ? company.stateCode === v.stateCode : null, companyStateCode: company?.stateCode || "" });
+  } catch (err) { serverError(res, err, "GSTIN lookup"); }
+};
+
+// GET /api/business-customers?userId=&search= — saved business buyers (by name or GSTIN)
+export const listBusinessCustomers = async (req, res) => {
+  try {
+    const who = await requireUser(req, res);
+    if (!who) return;
+    const term = String(req.query.search || "").trim();
+    const q = term ? { $or: [{ legalName: { $regex: term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } }, { gstin: { $regex: term.toUpperCase().replace(/[^A-Z0-9]/g, "") } }] } : {};
+    const businesses = await BusinessCustomer.find(q).sort({ updatedAt: -1 }).limit(50).lean();
+    res.json({ businesses });
+  } catch (err) { serverError(res, err, "List business customers"); }
 };

@@ -12,6 +12,16 @@ import {
   computeEarn, postEarn, reverseInvoiceRedemptions, previewReturn, applyReturnRefund, snapshotLineCosts, toId,
 } from "../utils/redemptions.js";
 import { round2, normalizePhone } from "../utils/retailMath.js";
+import { buildB2BFields, recomputeB2BBreakup, stripB2BFields, clearedB2BFields } from "../utils/gstInvoice.js";
+
+// Business (B2B) request from the billing screen: { isB2B, buyerGstin, buyer: { legalName, ... } }
+const takeB2BRequest = (body) => {
+  const req = body.isB2B === true ? { ...(body.buyer || {}), gstin: body.buyerGstin ?? body.buyer?.gstin } : body.isB2B === false ? "off" : undefined;
+  delete body.buyer;
+  stripB2BFields(body);
+  return req;
+};
+const B2B_COPY = ["businessCustomerId", "buyerGstin", "buyerLegalName", "buyerTradeName", "buyerAddress", "buyerPan", "placeOfSupply", "sellerGstin", "sellerStateCode"];
 
 // Fields only the server may set (anything the client sends for these is ignored)
 const SERVER_ONLY_FIELDS = [
@@ -149,7 +159,8 @@ export const createSalesInvoice = async (req, res) => {
     const invoiceData = req.body;
     const userId = invoiceData.userId;
 
-    if (!invoiceData.customer || !userId) {
+    // A business (GST) invoice may leave the name empty: the buyer's legal name is filled in below
+    if ((!invoiceData.customer && invoiceData.isB2B !== true) || !userId) {
       return res.status(400).json({ message: "Customer name and userId are required" });
     }
 
@@ -233,6 +244,7 @@ export const createSalesInvoice = async (req, res) => {
     delete invoiceData.redemptions;
     delete invoiceData.refundMode;
     stripServerFields(invoiceData);
+    const b2bRequest = takeB2BRequest(invoiceData);
     invoiceData._id = new mongoose.Types.ObjectId(); // known up front so ledger rows can point at it
 
     let customer = null, plan = null, earn = null, original = null, split = null;
@@ -259,6 +271,12 @@ export const createSalesInvoice = async (req, res) => {
         invoiceData.amountDue = -split.cashRefund;
         invoiceData.totalRedeemed = round2(split.returnValue - split.cashRefund);
         await snapshotLineCosts(invoiceData.lineItems, original?.lineItems || []);
+        // A return of a business invoice is a GST credit note for the same buyer
+        if (original?.isB2B) {
+          invoiceData.isB2B = true;
+          for (const k of B2B_COPY) invoiceData[k] = original[k];
+          Object.assign(invoiceData, await recomputeB2BBreakup(invoiceData));
+        }
       } else {
         customer = await findOrCreateCustomer({ name: invoiceData.customer, phone: invoiceData.customerPhone, locCode: invoiceData.locCode, createdBy: userId });
         invoiceData.customerId = customer?._id || null;
@@ -278,6 +296,11 @@ export const createSalesInvoice = async (req, res) => {
         });
         validatePayment(invoiceData, clientAmountDue);
         await snapshotLineCosts(invoiceData.lineItems);
+        if (b2bRequest && b2bRequest !== "off") {
+          const { fields } = await buildB2BFields({ buyer: b2bRequest, invoice: invoiceData });
+          Object.assign(invoiceData, fields);
+          if (!String(invoiceData.customer || "").trim()) invoiceData.customer = fields.buyerLegalName;
+        }
       }
     } catch (err) {
       if (err instanceof HttpError) return httpErrorResponse(res, err);
@@ -719,6 +742,7 @@ export const updateSalesInvoice = async (req, res) => {
     delete req.body.redemptions;
     delete req.body.refundMode;
     stripServerFields(req.body);
+    const b2bRequestEdit = takeB2BRequest(req.body);
 
     // A return-triggered update (original invoice trimmed after a return) must NOT move stock:
     // the separate RTN- invoice already put the returned pieces back.
@@ -813,6 +837,21 @@ export const updateSalesInvoice = async (req, res) => {
         }
       }
       if (Array.isArray(req.body.lineItems)) await snapshotLineCosts(req.body.lineItems, oldInvoice.lineItems || []);
+
+      // Business (B2B) GST: switch on/off, or recompute the breakup when lines or totals change
+      const mergedForGst = { ...oldInvoice, ...req.body };
+      // A business invoice's customer name falls back to the buyer's legal name
+      if (req.body.customer !== undefined && !String(req.body.customer).trim() && (oldInvoice.isB2B || b2bRequestEdit) && b2bRequestEdit !== "off") {
+        req.body.customer = oldInvoice.buyerLegalName || req.body.customer;
+      }
+      if (b2bRequestEdit === "off") {
+        if (oldInvoice.isB2B) Object.assign(req.body, clearedB2BFields());
+      } else if (b2bRequestEdit) {
+        const { fields } = await buildB2BFields({ buyer: b2bRequestEdit, invoice: mergedForGst });
+        Object.assign(req.body, fields);
+      } else if (oldInvoice.isB2B && ["lineItems", "finalTotal", "tdsTcsAmount", "adjustmentAmount"].some((k) => req.body[k] !== undefined)) {
+        Object.assign(req.body, await recomputeB2BBreakup(mergedForGst));
+      }
 
       invoice = await SalesInvoice.findByIdAndUpdate(
         id,

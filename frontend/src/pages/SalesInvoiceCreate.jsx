@@ -11,6 +11,9 @@ import useBillRedemptions from "../hooks/useBillRedemptions";
 import RedemptionPanel from "../components/billing/RedemptionPanel";
 import useBillTabs from "../hooks/useBillTabs";
 import BillTabs from "../components/billing/BillTabs";
+import BusinessInvoicePanel, { EMPTY_B2B, b2bProblem } from "../components/billing/BusinessInvoicePanel";
+import useCompanyProfile from "../hooks/useCompanyProfile";
+import { validateGstin } from "../utils/gst";
 
 // Utility function to round to 2 decimal places without floating-point errors
 // This fixes issues like 9999.99 showing as 9999.989999 or 100.01 instead of 100.00
@@ -901,6 +904,8 @@ const SalesInvoiceCreate = () => {
   
   const [customer, setCustomer] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  // Business (GST) invoice details (F8) — see components/billing/BusinessInvoicePanel.jsx
+  const [b2b, setB2b] = useState({ ...EMPTY_B2B });
   const [branch, setBranch] = useState(getInitialBranch());
   const [invoiceNumber, setInvoiceNumber] = useState("INV-009193");
   const [invoiceDate, setInvoiceDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -1315,6 +1320,21 @@ const SalesInvoiceCreate = () => {
 
   const totals = calculateTotals();
 
+  // Business (GST) bill: CGST+SGST or IGST follows the buyer's state, not the item tax setting
+  const companyProfile = useCompanyProfile();
+  const shownTaxBreakdown = (() => {
+    if (!b2b.enabled || b2b.noGstin || !companyProfile?.stateCode) return totals.taxBreakdown;
+    const v = validateGstin(b2b.gstin);
+    if (!v.valid) return totals.taxBreakdown;
+    const type = v.stateCode === companyProfile.stateCode ? "GST" : "IGST";
+    const merged = new Map();
+    for (const t of totals.taxBreakdown) {
+      const prev = merged.get(t.rate);
+      merged.set(t.rate, { type, rate: t.rate, amount: round2((prev?.amount || 0) + t.amount) });
+    }
+    return [...merged.values()];
+  })();
+
   const API_URL = baseUrl?.baseUrl?.replace(/\/$/, "") || "http://localhost:7000";
 
   // Get user info from localStorage
@@ -1699,6 +1719,11 @@ const SalesInvoiceCreate = () => {
       showStockAlert("The phone number is not valid. Use a 10-digit mobile number (or 6–15 digits), or leave it empty for a walk-in.", 'error');
       return;
     }
+    const b2bError = isReturnCategory ? "" : b2bProblem(b2b);
+    if (b2bError) {
+      showStockAlert(b2bError, 'error');
+      return;
+    }
 
     // Validate payment method is selected (not needed when redemptions cover the whole bill)
     if (!isSplitPayment && (!paymentMethod || paymentMethod.length === 0) && (isReturnCategory || amountDue > 0.004)) {
@@ -1851,6 +1876,12 @@ const SalesInvoiceCreate = () => {
         finalTotal: parseFloat(totals.finalTotal) || 0,
         // Redemptions + the amount due the screen showed (server recomputes and rejects a mismatch)
         redemptions: isReturnCategory ? [] : redemption.payload,
+        // Business (GST) invoice: the server validates the GSTIN and computes the tax breakup
+        isB2B: !isReturnCategory && b2b.enabled && !b2b.noGstin,
+        ...(!isReturnCategory && b2b.enabled && !b2b.noGstin ? {
+          buyerGstin: b2b.gstin.trim().toUpperCase(),
+          buyer: { legalName: b2b.legalName.trim(), tradeName: b2b.tradeName.trim(), address: b2b.address.trim(), phone: b2b.phone, email: b2b.email },
+        } : {}),
         amountDue: isReturnCategory ? undefined : amountDue,
         status,
         userId: user.email || user.username || "",
@@ -2116,8 +2147,8 @@ Customer Service Available`;
   const billState = useMemo(() => ({
     customer, customerPhone, salesperson, subject, paymentMethod, isSplitPayment, splitPaymentAmounts,
     lineItems, discount, applyDiscountAfterTax, showDiscountSection, tdsTcsType, tdsTcsTax, adjustment,
-    customerNotes, tax, totalTaxAmount, redemption: exportRedemptions(),
-  }), [customer, customerPhone, salesperson, subject, paymentMethod, isSplitPayment, splitPaymentAmounts,
+    customerNotes, tax, totalTaxAmount, b2b, redemption: exportRedemptions(),
+  }), [b2b, customer, customerPhone, salesperson, subject, paymentMethod, isSplitPayment, splitPaymentAmounts,
     lineItems, discount, applyDiscountAfterTax, showDiscountSection, tdsTcsType, tdsTcsTax, adjustment,
     customerNotes, tax, totalTaxAmount, exportRedemptions]);
   const makeEmptyBill = useCallback(() => ({
@@ -2125,7 +2156,7 @@ Customer Service Available`;
     splitPaymentAmounts: { cash: "", bank: "", upi: "", rbl: "" }, lineItems: [blankLineItem()],
     discount: { value: "0", type: "₹" }, applyDiscountAfterTax: false, showDiscountSection: false,
     tdsTcsType: "TDS", tdsTcsTax: "", adjustment: "0.00", customerNotes: "Thanks for your business.",
-    tax: "", totalTaxAmount: "", redemption: { redemptions: [], owner: null },
+    tax: "", totalTaxAmount: "", b2b: { ...EMPTY_B2B }, redemption: { redemptions: [], owner: null },
   }), []);
   const importRedemptions = redemption.importState;
   const restoreBill = useCallback((b) => {
@@ -2149,6 +2180,7 @@ Customer Service Available`;
     setCustomerNotes(s.customerNotes ?? e.customerNotes);
     setTax(s.tax ?? "");
     setTotalTaxAmount(s.totalTaxAmount ?? "");
+    setB2b({ ...EMPTY_B2B, ...(s.b2b || {}) });
     importRedemptions(s.redemption);
   }, [makeEmptyBill, importRedemptions]);
   const billHasItems = useCallback((b) => (b?.lineItems || []).some((l) => l && (l.item || l.itemData)), []);
@@ -2194,6 +2226,9 @@ Customer Service Available`;
           setCustomer(invoiceData.customer || "");
           setCustomerPhone(invoiceData.customerPhone || "");
           redemption.loadSaved(invoiceData.redemptions, invoiceData.customerId);
+          setB2b(invoiceData.isB2B
+            ? { ...EMPTY_B2B, enabled: true, gstin: invoiceData.buyerGstin || "", legalName: invoiceData.buyerLegalName || "", tradeName: invoiceData.buyerTradeName || "", address: invoiceData.buyerAddress || "" }
+            : { ...EMPTY_B2B });
           setBranch(invoiceData.branch || "Warehouse");
           setInvoiceNumber(invoiceData.invoiceNumber || "");
           setInvoiceDate(invoiceData.invoiceDate ? new Date(invoiceData.invoiceDate).toISOString().slice(0, 10) : "");
@@ -3317,6 +3352,18 @@ Customer Service Available`;
                   </div>
                 </div>
 
+                {/* BUSINESS (GST) INVOICE */}
+                {!["return", "refund", "cancel"].includes((category || "").toLowerCase().trim()) && (
+                  <BusinessInvoicePanel
+                    value={b2b}
+                    onChange={setB2b}
+                    lines={lineItems}
+                    saleValue={(parseFloat(totals.finalTotal) || 0) + (parseFloat(totals.tdsTcsAmount) || 0) - (parseFloat(totals.adjustmentAmount) || 0)}
+                    onBuyerName={(name) => { if (name && (!customer.trim() || customer === b2b.legalName)) setCustomer(name); }}
+                    disabled={isSaving}
+                  />
+                )}
+
                 {/* CLASSIFICATION */}
                 <div className="mt-8 pt-6 border-t border-[#F3F4F6]">
                   <p className="mb-4 text-xs font-bold uppercase tracking-wider text-[#1C1F26]">
@@ -3817,9 +3864,9 @@ Customer Service Available`;
               </div>
 
               {/* Tax Breakdown */}
-              {totals.taxBreakdown.length > 0 && (
+              {shownTaxBreakdown.length > 0 && (
                 <div className="space-y-1 bg-[#F9FAFB] p-2.5 rounded-none border border-[#E5E7EB]/50">
-                  {totals.taxBreakdown.map((tax, idx) => {
+                  {shownTaxBreakdown.map((tax, idx) => {
                     if (tax.type === 'GST') {
                       const half = tax.amount / 2;
                       const halfPct = tax.rate / 2;

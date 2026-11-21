@@ -134,6 +134,34 @@ const salesInvoiceSchema = new mongoose.Schema(
     // How much of the above later returns have already restored / reversed (caps rounding over several returns)
     loyaltyPointsRestored: { type: Number, default: 0 },
     loyaltyPointsReversed: { type: Number, default: 0 },
+    // ── Business (B2B) GST invoice (F8). Buyer and seller details are snapshots taken
+    // when the invoice was saved, so later profile/customer edits do not change old invoices.
+    isB2B: { type: Boolean, default: false },
+    businessCustomerId: { type: mongoose.Schema.Types.ObjectId, ref: "BusinessCustomer", default: null },
+    buyerGstin: { type: String, default: "" },
+    buyerLegalName: { type: String, default: "" },
+    buyerTradeName: { type: String, default: "" },
+    buyerAddress: { type: String, default: "" },
+    buyerPan: { type: String, default: "" },
+    placeOfSupply: {
+      stateCode: { type: String, default: "" },
+      stateName: { type: String, default: "" },
+    },
+    sellerGstin: { type: String, default: "" },
+    sellerStateCode: { type: String, default: "" },
+    taxBreakup: {
+      intra: Boolean,
+      taxable: Number,
+      cgst: Number,
+      sgst: Number,
+      igst: Number,
+      tax: Number,
+    },
+    hsnSummary: [{ _id: false, hsnCode: String, rate: Number, quantity: Number, taxable: Number, cgst: Number, sgst: Number, igst: Number, tax: Number }],
+    gstLines: [{
+      _id: false, description: String, hsnCode: String, quantity: Number, unitRate: Number, rate: Number,
+      gross: Number, discount: Number, taxable: Number, cgst: Number, sgst: Number, igst: Number, tax: Number, total: Number,
+    }],
     // On a return invoice: how the refund was paid out
     refundBreakdown: {
       mode: { type: String, enum: ["cash", "storeCredit"] },
