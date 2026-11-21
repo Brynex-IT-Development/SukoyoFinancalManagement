@@ -34,7 +34,8 @@ import {
     ArrowUpRight,
     Wallet,
     Gift,
-    Ticket
+    Ticket,
+    Building
 } from "lucide-react";
 import salesInventoryAccessConfig from "../config/salesInventoryAccess.json";
 import baseUrl from "../api/api.js";
@@ -306,6 +307,7 @@ const Nav = () => {
         { to: "/manage-users/add-user", label: "Add New User", Icon: UserPlus },
         { to: "/manage-users/existing-users", label: "Existing Users", Icon: UserCog },
         { to: "/manage-users/reset-password", label: "Reset Password", Icon: KeyRound },
+        { to: "/manage-users/company-profile", label: "Company Profile", Icon: Building },
     ];
     const isManageUsersActive = manageUsersLinks.some((link) => link.to === activePath);
 

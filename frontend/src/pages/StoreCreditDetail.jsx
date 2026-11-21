@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useReactToPrint } from "react-to-print";
 import { ArrowLeft, Printer, Ban } from "lucide-react";
 import Header from "../components/Header";
+import useCompanyProfile, { companyAddressLine } from "../hooks/useCompanyProfile";
 import useSidebar from "../hooks/useSidebar";
 import { api, formatCurrency, formatDate, formatDateTime, isAdminUser, ui, STORE_CREDIT_STATUS_STYLES } from "../utils/retailApi";
 
@@ -13,6 +14,7 @@ const StoreCreditDetail = () => {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const slipRef = useRef(null);
+  const company = useCompanyProfile();
   const print = useReactToPrint({ contentRef: slipRef, documentTitle: sc ? `Store credit ${sc.number}` : "Store credit" });
 
   const load = useCallback(() => {
@@ -99,6 +101,9 @@ const StoreCreditDetail = () => {
       <div style={{ display: "none" }}>
         <div ref={slipRef} style={{ width: "80mm", padding: "6mm", fontFamily: "Arial, sans-serif", color: "#111" }}>
           <div style={{ textAlign: "center", fontWeight: 800, fontSize: 16, letterSpacing: 1 }}>STORE CREDIT</div>
+          {company?.companyName && <div style={{ textAlign: "center", fontSize: 13, fontWeight: 700, marginTop: 2 }}>{company.companyName}</div>}
+          {companyAddressLine(company) && <div style={{ textAlign: "center", fontSize: 9 }}>{companyAddressLine(company)}</div>}
+          {company?.gstin && <div style={{ textAlign: "center", fontSize: 9 }}>GSTIN {company.gstin}</div>}
           <div style={{ textAlign: "center", fontSize: 11, marginTop: 2 }}>Store {sc.locCode || ""}</div>
           <hr style={{ margin: "8px 0" }} />
           <div style={{ fontSize: 12 }}>Credit no.</div>

@@ -21,6 +21,8 @@ import {
 } from "lucide-react";
 import baseUrl from "../api/api";
 import { redemptionLabel } from "../utils/retailApi";
+import useCompanyProfile, { companyAddressLine } from "../hooks/useCompanyProfile";
+import { stateName as gstStateName } from "../utils/gst";
 import useSidebar from "../hooks/useSidebar";
 import Header from "../components/Header";
 import { mapLocNameToWarehouse as mapWarehouse } from "../utils/warehouseMapping";
@@ -45,6 +47,8 @@ const SalesInvoiceDetail = () => {
   const [returnReason, setReturnReason] = useState("");
   const [returnPaymentMethod, setReturnPaymentMethod] = useState("Cash");
   const [returningInvoice, setReturningInvoice] = useState(false);
+  // Company profile (F7) for the header / bank details
+  const company = useCompanyProfile();
   // Refund as cash (current behaviour) or as store credit; preview of the split comes from the server
   const [refundMode, setRefundMode] = useState("cash");
   const [refundPreview, setRefundPreview] = useState(null);
@@ -1041,18 +1045,21 @@ const SalesInvoiceDetail = () => {
                     <div className="flex items-center gap-2">
                       <Building2 size={20} className="text-[#1C1F26]" />
                       <h1 className="text-xl font-extrabold tracking-tight text-[#111827] uppercase">
-                        {storeInfo?.name || invoice.branch || "Bridesberry"}
+                        {company?.companyName || storeInfo?.name || invoice.branch || "Bridesberry"}
                       </h1>
                     </div>
+                    {company?.logo && <img src={company.logo} alt="" className="max-h-12 max-w-[140px] object-contain" />}
                     <div className="text-xs text-[#4B5563] space-y-0.5 leading-relaxed">
-                      {storeInfo?.address && <div>{storeInfo.address}</div>}
-                      {storeInfo?.city && <div>{storeInfo.city}</div>}
-                      {storeInfo?.state && <div>{storeInfo.state}</div>}
-                      {!storeInfo?.address && !storeInfo?.city && <div>Kerala, INDIA</div>}
+                      {companyAddressLine(company) && <div>{companyAddressLine(company)}</div>}
+                      {company?.companyName && storeInfo?.name && storeInfo.name !== company.companyName && <div>Store: {storeInfo.name}</div>}
+                      {!companyAddressLine(company) && storeInfo?.address && <div>{storeInfo.address}</div>}
+                      {!companyAddressLine(company) && storeInfo?.city && <div>{storeInfo.city}</div>}
+                      {!companyAddressLine(company) && storeInfo?.state && <div>{storeInfo.state}</div>}
+                      {!companyAddressLine(company) && !storeInfo?.address && !storeInfo?.city && <div>Kerala, INDIA</div>}
                     </div>
                     <div className="pt-1">
                       <span className="inline-flex items-center px-2 py-0.5 bg-[#F3F4F6] border border-[#E5E7EB] text-[#111827] text-[11px] font-bold tracking-wider font-mono">
-                        GSTIN: 32AEHCR4208L1ZS
+                        GSTIN: {invoice.sellerGstin || company?.gstin || "32AEHCR4208L1ZS"}
                       </span>
                     </div>
                   </div>
@@ -1130,7 +1137,9 @@ const SalesInvoiceDetail = () => {
                         Place of Supply
                       </span>
                       <span className="font-semibold text-[#111827]">
-                        Kerala (32)
+                        {invoice.placeOfSupply?.stateCode
+                          ? `${invoice.placeOfSupply.stateName} (${invoice.placeOfSupply.stateCode})`
+                          : company?.stateCode ? `${gstStateName(company.stateCode)} (${company.stateCode})` : "Kerala (32)"}
                       </span>
                     </div>
                     <div>
@@ -1368,6 +1377,23 @@ const SalesInvoiceDetail = () => {
                   </div>
                 </div>
 
+                {/* Bank details & footer note from the company profile (F7) */}
+                {(company?.bankName || company?.accountNumber || company?.upiId || company?.invoiceFooterNote) && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-[#4B5563]">
+                    {(company.bankName || company.accountNumber || company.upiId) && (
+                      <div className="space-y-0.5">
+                        <div className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Bank details</div>
+                        {company.bankName && <div>{company.bankName}{company.branch ? `, ${company.branch}` : ""}</div>}
+                        {company.accountHolder && <div>A/c name: {company.accountHolder}</div>}
+                        {company.accountNumber && <div>A/c no: {company.accountNumber}</div>}
+                        {company.ifsc && <div>IFSC: {company.ifsc}</div>}
+                        {company.upiId && <div>UPI: {company.upiId}</div>}
+                      </div>
+                    )}
+                    {company.invoiceFooterNote && <div className="text-[11px] leading-relaxed md:text-right">{company.invoiceFooterNote}</div>}
+                  </div>
+                )}
+
                 {/* 5. Signature Section */}
                 <div className="pt-6 border-t border-[#E5E7EB] flex flex-wrap items-end justify-between gap-6">
                   <div className="text-[11px] text-[#9CA3AF]">
@@ -1379,7 +1405,7 @@ const SalesInvoiceDetail = () => {
                       Authorised Signature
                     </div>
                     <div className="text-[11px] text-[#6B7280] mt-0.5">
-                      For {storeInfo?.name || invoice.branch || "Bridesberry"}
+                      For {company?.companyName || storeInfo?.name || invoice.branch || "Bridesberry"}
                     </div>
                   </div>
                 </div>

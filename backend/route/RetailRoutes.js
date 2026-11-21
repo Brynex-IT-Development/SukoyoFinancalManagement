@@ -12,6 +12,7 @@ import {
 import {
   listVouchers, createVouchers, getVoucher, getVoucherBatch, getScopeOptions, setVoucherActive,
 } from "../controllers/VoucherController.js";
+import { getCompanyProfileApi, saveCompanyProfile } from "../controllers/GstController.js";
 
 const router = express.Router();
 
@@ -51,6 +52,10 @@ router.get("/vouchers/scope-options", getScopeOptions); // before /vouchers/:id
 router.get("/vouchers/batch/:batchRef", getVoucherBatch);
 router.get("/vouchers/:id", getVoucher);
 router.patch("/vouchers/:id/active", setVoucherActive);
+
+// Company profile (F7)
+router.get("/company-profile", getCompanyProfileApi);
+router.put("/company-profile", saveCompanyProfile);
 
 // Billing screen "Apply" panel — preview what can be redeemed
 router.post("/redemptions/check", checkRedemption);

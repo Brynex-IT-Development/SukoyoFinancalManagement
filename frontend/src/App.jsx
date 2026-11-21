@@ -67,6 +67,7 @@ import GiftCardDetail from "./pages/GiftCardDetail.jsx";
 import Vouchers from "./pages/Vouchers.jsx";
 import VoucherCreate from "./pages/VoucherCreate.jsx";
 import VoucherDetail from "./pages/VoucherDetail.jsx";
+import CompanyProfile from "./pages/CompanyProfile.jsx";
 import InactiveItems from "./pages/InactiveItems.jsx";
 import PurchaseVendors from "./pages/PurchaseVendors.jsx";
 import PurchaseVendorCreate from "./pages/PurchaseVendorCreate.jsx";
@@ -212,6 +213,7 @@ const App = () => {
           <Route path="/manage-users/existing-users" element={currentuser?.power === 'admin' ? <ExistingUsers /> : <Navigate to='/' />} />
           <Route path="/manage-users/edit-user/:id" element={currentuser?.power === 'admin' ? <EditUser /> : <Navigate to='/' />} />
           <Route path="/manage-users/reset-password" element={currentuser?.power === 'admin' ? <ResetUserPassword /> : <Navigate to='/' />} />
+          <Route path="/manage-users/company-profile" element={currentuser ? <CompanyProfile /> : <Navigate to="/login" />} />
           
           <Route path="/shoe-sales/items" element={currentuser ? <ShoeSalesItems /> : <Navigate to="/login" />} />
           <Route path="/shoe-sales/inactive-items" element={currentuser ? <InactiveItems /> : <Navigate to="/login" />} />
