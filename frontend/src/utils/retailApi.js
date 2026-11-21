@@ -69,6 +69,46 @@ export const STORE_CREDIT_STATUS_STYLES = {
   void: "bg-red-50 border-red-200 text-red-700",
 };
 
+export const GIFT_CARD_STATUS_STYLES = {
+  active: "bg-[#F6FCE6] border-[#DEF39A] text-[#15171D]",
+  blocked: "bg-red-50 border-red-200 text-red-700",
+  expired: "bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]",
+};
+
+/** Human label for one invoice redemption (loyalty / store credit / gift card / voucher). */
+export const redemptionLabel = (r) =>
+  r.type === "loyalty" ? `Loyalty points (${r.points} pts)`
+    : r.type === "storeCredit" ? `Store credit ${r.code}`
+    : r.type === "giftCard" ? `Gift card ${r.code}`
+    : r.type === "voucher" ? `Voucher ${r.code}`
+    : `${r.type} ${r.code || ""}`;
+
+/** Voucher value as text: "₹500 stored value", "10% off (max ₹150)", "₹100 off". */
+export const voucherValueText = (v) =>
+  v.kind === "value" ? `₹${v.value} stored value`
+    : v.discountType === "percent" ? `${v.value}% off${v.maxDiscount ? ` (max ₹${v.maxDiscount})` : ""}`
+    : `₹${v.value} off`;
+
+/** Voucher state for lists: inactive | expired | not started | active. */
+export const voucherState = (v) => {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const day = (d) => new Date(d).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  if (!v.active) return "inactive";
+  if (v.validTo && day(v.validTo) < today) return "expired";
+  if (v.validFrom && day(v.validFrom) > today) return "not started";
+  if (v.kind === "value" && !(v.balance > 0)) return "used up";
+  if (v.usageLimitTotal && v.usedCount >= v.usageLimitTotal) return "used up";
+  return "active";
+};
+
+export const VOUCHER_STATE_STYLES = {
+  active: "bg-[#F6FCE6] border-[#DEF39A] text-[#15171D]",
+  inactive: "bg-[#F3F4F6] border-[#E5E7EB] text-[#6B7280]",
+  expired: "bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]",
+  "not started": "bg-blue-50 border-blue-200 text-blue-700",
+  "used up": "bg-[#F3F4F6] border-[#E5E7EB] text-[#6B7280]",
+};
+
 export const LEDGER_LABELS = {
   earn: "Earned",
   redeem: "Redeemed",
