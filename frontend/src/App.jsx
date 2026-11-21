@@ -86,6 +86,7 @@ import VendorPaymentDetail from "./pages/VendorPaymentDetail.jsx";
 import VendorOutstanding from "./pages/VendorOutstanding.jsx";
 import VendorAging from "./pages/VendorAging.jsx";
 import VendorStatement from "./pages/VendorStatement.jsx";
+import BillWiseProfit from "./pages/BillWiseProfit.jsx";
 import ProfitLoss from "./pages/ProfitLoss.jsx";
 import VendorCredits from "./pages/VendorCredits.jsx";
 import VendorCreditDetail from "./pages/VendorCreditDetail.jsx";
@@ -312,6 +313,7 @@ const App = () => {
           <Route path="/reports/vendor-outstanding" element={currentuser ? <VendorOutstanding /> : <Navigate to="/login" />} />
           <Route path="/reports/vendor-aging" element={currentuser ? <VendorAging /> : <Navigate to="/login" />} />
           <Route path="/reports/vendor-statement" element={currentuser ? <VendorStatement /> : <Navigate to="/login" />} />
+          <Route path="/reports/bill-profit" element={currentuser ? <BillWiseProfit /> : <Navigate to="/login" />} />
           <Route path="/reports/profit-loss" element={currentuser ? <ProfitLoss /> : <Navigate to="/login" />} />
           <Route path="/reports/income-expense" element={currentuser ? <IncomeExpenseReport /> : <Navigate to="/login" />} />
           

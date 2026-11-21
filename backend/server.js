@@ -34,6 +34,7 @@ import DashboardRoutes from "./route/DashboardRoutes.js";
 import RetailRoutes from "./route/RetailRoutes.js";
 import PayablesRoutes from "./route/PayablesRoutes.js";
 import ProfitLossRoutes from "./route/ProfitLossRoutes.js";
+import BillProfitRoutes from "./route/BillProfitRoutes.js";
 import setupSwagger   from "./swagger.js";
 
 const env     = process.env.NODE_ENV || "development";
@@ -134,6 +135,7 @@ app.use("/api",     ExpenseTargetRoutes);
 app.use("/api",     RetailRoutes);
 app.use("/api",     PayablesRoutes);
 app.use("/api",     ProfitLossRoutes);
+app.use("/api",     BillProfitRoutes);
 
 // Test route to verify server is running
 app.get("/api/test", (_req, res) => {

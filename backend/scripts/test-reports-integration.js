@@ -7,6 +7,7 @@ import mongoose from "mongoose";
 import User from "../model/UserModel.js";
 import Store from "../model/Store.js";
 import { profitAndLoss, profitStock } from "../controllers/ProfitLossController.js";
+import { billWiseProfit, billProfitDetail } from "../controllers/BillProfitController.js";
 import { istDateString } from "../utils/ist.js";
 
 const uri = process.env.TEST_MONGODB_URI || "";
@@ -137,6 +138,31 @@ r = await call(profitStock, { query: { userId: STAFF, fromDate: FROM, toDate: TO
 eq("P&L stock: store user = their store only", r.body.current, 9500);
 r = await call(profitStock, { query: { userId: CLUSTER, fromDate: FROM, toDate: TO } });
 eq("P&L stock: cluster manager (several stores) gets current value only", [r.body.current, r.body.opening, r.body.closing], [12500, null, null]);
+
+// ═══ F12 Bill-wise profit ═══
+// One row per sale in the period: INV-1 2,000/1,200, INV-2 5,000/2,500 (as sold), INV-3 1,000/600 (current cost), INV-5 1,000/600
+r = await call(billWiseProfit, { query: { userId: ADMIN, fromDate: FROM, toDate: TO } });
+const rowsBy = Object.fromEntries(r.body.rows.map((x) => [x.invoiceNumber, x]));
+eq("bill profit: one row per sale (drafts, returns, other periods left out)", r.body.rows.map((x) => x.invoiceNumber).sort(), ["INV-1", "INV-2", "INV-3", "INV-5"]);
+eq("bill profit: INV-1 selling / cost / profit / margin / status", pick(rowsBy["INV-1"], ["selling", "cost", "profit", "marginPct", "status", "items", "qty"]), [2000, 1200, 800, 40, "Profit", 1, 2]);
+eq("bill profit: INV-2 counted as sold (rebuilt after the partial return)", pick(rowsBy["INV-2"], ["selling", "cost", "profit", "rebuilt", "returnStatus", "qty"]), [5000, 2500, 2500, true, "partial", 4]);
+eq("bill profit: INV-3 uses current cost (noted)", pick(rowsBy["INV-3"], ["cost", "fallbackLines"]), [600, 1]);
+eq("bill profit: totals match the P&L sales and cost of goods sold", pick(r.body.totals, ["invoices", "selling", "cost", "profit", "marginPct"]), [4, pl.salesTaxable, pl.costSold, 4100, 45.56]);
+eq("bill profit: salesperson list", r.body.salespeople, ["Anu", "Binu", "Cini"]);
+r = await call(billWiseProfit, { query: { userId: ADMIN, fromDate: FROM, toDate: TO, salesperson: "Binu" } });
+eq("bill profit: salesperson filter", r.body.rows.map((x) => x.invoiceNumber), ["INV-2"]);
+r = await call(billWiseProfit, { query: { userId: ADMIN, fromDate: FROM, toDate: TO, status: "Loss" } });
+eq("bill profit: status filter (no losses)", [r.body.rows.length, r.body.totals.byStatus.Loss], [0, 0]);
+r = await call(billWiseProfit, { query: { userId: ADMIN, fromDate: FROM, toDate: TO, search: "inv-3" } });
+eq("bill profit: search by invoice number", r.body.rows.map((x) => x.invoiceNumber), ["INV-3"]);
+r = await call(billWiseProfit, { query: { userId: STAFF, fromDate: FROM, toDate: TO } });
+eq("bill profit: store user sees only their store", r.body.rows.map((x) => x.invoiceNumber).sort(), ["INV-1", "INV-2", "INV-3"]);
+r = await call(billProfitDetail, { params: { id: String(s2Id) }, query: { userId: ADMIN } });
+eq("bill profit detail: per line selling / cost / profit", r.body.lines.map((l) => [l.name, l.qty, l.taxable, l.cost, l.profit]), [["Chain", 3, 3000, 1500, 1500], ["Bangle 2.4", 1, 2000, 1000, 1000]]);
+eq("bill profit detail: rebuilt from its return", [r.body.rebuilt, r.body.returns.map((x) => x.invoiceNumber)], [true, ["RTN-1"]]);
+const inv5 = await db.collection("salesinvoices").findOne({ invoiceNumber: "INV-5" });
+r = await call(billProfitDetail, { params: { id: String(inv5._id) }, query: { userId: STAFF } });
+eq("bill profit detail: another store's invoice → 403", r.status, 403);
 
 // ═══ (later features add their checks above this line) ═══
 

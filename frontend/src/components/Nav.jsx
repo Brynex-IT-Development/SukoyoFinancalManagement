@@ -220,7 +220,7 @@ const Nav = () => {
     }, []);
 
     const getInitialSection = useMemo(() => {
-        if (activePath === "/reports/sales" || activePath === "/reports/sales-by-invoice" || activePath === "/reports/inventory" || activePath === "/reports/income-expense" || activePath === "/securityReport" || activePath === "/Revenuereport" || activePath === "/BookingReport" || activePath === "/RentOutReport" || activePath === "/reports/sales-by-group" || activePath.startsWith("/reports/vendor-") || activePath === "/reports/profit-loss") {
+        if (activePath === "/reports/sales" || activePath === "/reports/sales-by-invoice" || activePath === "/reports/inventory" || activePath === "/reports/income-expense" || activePath === "/securityReport" || activePath === "/Revenuereport" || activePath === "/BookingReport" || activePath === "/RentOutReport" || activePath === "/reports/sales-by-group" || activePath.startsWith("/reports/vendor-") || activePath === "/reports/bill-profit" || activePath === "/reports/profit-loss") {
             return "reports";
         }
         if (activePath.startsWith("/inventory") ||
@@ -322,6 +322,7 @@ const Nav = () => {
         "/reports/vendor-outstanding",
         "/reports/vendor-aging",
         "/reports/vendor-statement",
+        "/reports/bill-profit",
         "/reports/profit-loss",
         ...(hasSalesInventoryAccess ? ["/reports/sales", "/reports/sales-by-invoice", "/reports/inventory"] : [])
     ].includes(activePath);
@@ -467,6 +468,7 @@ const Nav = () => {
                                             <Link to="/reports/vendor-aging" className={subLinkClasses('/reports/vendor-aging')}><span>Vendor Aging</span></Link>
                                             <Link to="/reports/vendor-statement" className={subLinkClasses('/reports/vendor-statement')}><span>Vendor Statement</span></Link>
                                             <Link to="/reports/profit-loss" className={subLinkClasses('/reports/profit-loss')}><span>Profit &amp; Loss</span></Link>
+                                            <Link to="/reports/bill-profit" className={subLinkClasses('/reports/bill-profit')}><span>Bill-wise Profit</span></Link>
                                         </div>
                                     )}
                                 </div>
@@ -604,6 +606,7 @@ const Nav = () => {
                                                     <Link to="/reports/vendor-aging" className={subLinkClasses('/reports/vendor-aging')}><span>Vendor Aging</span></Link>
                                                     <Link to="/reports/vendor-statement" className={subLinkClasses('/reports/vendor-statement')}><span>Vendor Statement</span></Link>
                                                     <Link to="/reports/profit-loss" className={subLinkClasses('/reports/profit-loss')}><span>Profit &amp; Loss</span></Link>
+                                                    <Link to="/reports/bill-profit" className={subLinkClasses('/reports/bill-profit')}><span>Bill-wise Profit</span></Link>
                                                 </>
                                             )}
                                         </div>
