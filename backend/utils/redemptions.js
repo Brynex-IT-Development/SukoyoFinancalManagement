@@ -286,7 +286,10 @@ export const voucherLinesFrom = async (lines) => {
   const out = [];
   const cache = new Map();
   for (const line of lines || []) {
-    const amount = Number(line?.amount) || (Number(line?.quantity) || 0) * (Number(line?.rate) || 0);
+    // Tax-inclusive line price (qty × rate), like the bill total vouchers are taken off.
+    // line.amount from the billing screen is the price WITHOUT tax, so it is only a fallback.
+    const q = Number(line?.quantity) || 0, rt = Number(line?.rate) || 0;
+    const amount = q > 0 && rt > 0 ? q * rt : Math.abs(Number(line?.amount) || 0);
     let attrs = { itemIds: [], brand: "", categories: [], subCategory: "" };
     try {
       const target = await resolveLine(line);

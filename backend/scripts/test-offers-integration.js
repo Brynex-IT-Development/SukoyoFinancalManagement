@@ -212,7 +212,13 @@ r = await call(createSalesInvoice, { body: bill([line(ring), line(chain)], { cus
 eq("mixed redemptions on one bill", [r.status, r.body.amountDue, r.body.redemptions?.length], [201, 2100, 3]);
 eq("mixed: earn base excludes loyalty & voucher, keeps gift card (3000−100−100 = 2800 → 28)", r.body.loyaltyPointsEarned, 28);
 
+// Voucher scope uses the tax-inclusive price (qty × rate): the screen sends line.amount without tax
+await Voucher.create({ code: "TAXED10", kind: "discount", discountType: "percent", value: 10, active: true });
+r = await call(checkRedemption, { body: { userId: ADMIN, type: "voucher", code: "TAXED10", finalTotal: 2000, locCode: "T01", lines: [{ ...line(ring), amount: 1904.76 }] } });
+eq("voucher eligible total = qty × rate, not the pre-tax line amount", [r.status, r.body.eligibleTotal, r.body.amount], [200, 2000, 200]);
+
 console.log(`\nStore credits issued: ${await StoreCredit.countDocuments({})}`);
+await settle(); // let background daybook writes finish before disconnecting
 await mongoose.disconnect();
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nAll offers integration checks passed");
 process.exit(failed ? 1 : 0);
