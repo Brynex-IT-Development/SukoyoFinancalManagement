@@ -42,6 +42,7 @@ import EnquiryRoutes from "./route/EnquiryRoutes.js";
 import BankRoutes from "./route/BankRoutes.js";
 import BatchRoutes from "./route/BatchRoutes.js";
 import RepackRoutes from "./route/RepackRoutes.js";
+import ClassRoutes from "./route/ClassRoutes.js";
 import setupSwagger   from "./swagger.js";
 
 const env     = process.env.NODE_ENV || "development";
@@ -150,6 +151,7 @@ app.use("/api",     EnquiryRoutes);
 app.use("/api",     BankRoutes);
 app.use("/api",     BatchRoutes);
 app.use("/api",     RepackRoutes);
+app.use("/api",     ClassRoutes);
 
 // Test route to verify server is running
 app.get("/api/test", (_req, res) => {

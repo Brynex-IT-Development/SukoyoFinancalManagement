@@ -94,6 +94,7 @@ import BankAccounts from "./pages/BankAccounts.jsx";
 import ExpiringBatches from "./pages/ExpiringBatches.jsx";
 import Repacks from "./pages/Repacks.jsx";
 import RepackDetail from "./pages/RepackDetail.jsx";
+import Classes from "./pages/Classes.jsx";
 import PurchaseReports from "./pages/PurchaseReports.jsx";
 import BillWiseProfit from "./pages/BillWiseProfit.jsx";
 import ProfitLoss from "./pages/ProfitLoss.jsx";
@@ -331,6 +332,8 @@ const App = () => {
           <Route path="/reports/expiring-batches" element={currentuser ? <ExpiringBatches /> : <Navigate to="/login" />} />
           <Route path="/inventory/repacks" element={currentuser ? <Repacks /> : <Navigate to="/login" />} />
           <Route path="/inventory/repacks/:id" element={currentuser ? <RepackDetail /> : <Navigate to="/login" />} />
+          <Route path="/classes" element={currentuser ? <Navigate to="/classes/classes" replace /> : <Navigate to="/login" />} />
+          <Route path="/classes/:view" element={currentuser ? <Classes /> : <Navigate to="/login" />} />
           <Route path="/reports/purchases" element={currentuser ? <PurchaseReports /> : <Navigate to="/login" />} />
           <Route path="/reports/bill-profit" element={currentuser ? <BillWiseProfit /> : <Navigate to="/login" />} />
           <Route path="/reports/profit-loss" element={currentuser ? <ProfitLoss /> : <Navigate to="/login" />} />

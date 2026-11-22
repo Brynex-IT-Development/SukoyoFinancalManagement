@@ -37,7 +37,8 @@ import {
     Ticket,
     Building,
     CalendarCheck,
-    Landmark
+    Landmark,
+    GraduationCap
 } from "lucide-react";
 import salesInventoryAccessConfig from "../config/salesInventoryAccess.json";
 import baseUrl from "../api/api.js";
@@ -561,6 +562,9 @@ const Nav = () => {
                                         </div>
                                     )}
                                 </div>
+
+                                {/* Classes, tutors and bookings (F20) */}
+                                <Link to="/classes/classes" className={singleLinkClasses(activePath.startsWith("/classes") ? activePath : "/classes/classes")}><GraduationCap size={18} className="shrink-0" /><span>Classes</span></Link>
 
                                 {/* Offers: gift cards, vouchers, loyalty settings */}
                                 {hasSalesInventoryAccess && (

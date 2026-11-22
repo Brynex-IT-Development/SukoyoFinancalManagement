@@ -14,6 +14,8 @@ import { createPurchaseReceive, deletePurchaseReceive } from "../controllers/Pur
 import { listItemBatches, expiringBatches, reconcileBatchesNow } from "../controllers/BatchController.js";
 import { resolveLine, moveStock, applyLines } from "../utils/stockService.js";
 import { createRepack, deleteRepack, listRepacks, getRepack, searchRepackItems } from "../controllers/RepackController.js";
+import { listTutors, createTutor, updateTutor, listClasses, getClass, createClass, updateClass, listBookings, createBooking, changeBookingStatus } from "../controllers/ClassController.js";
+import { ClassSeat } from "../model/Booking.js";
 import { istDateString, addIstDays } from "../utils/ist.js";
 
 const uri = process.env.TEST_MONGODB_URI || "";
@@ -41,6 +43,7 @@ await mongoose.connect(uri);
 const db = mongoose.connection.db;
 await db.dropDatabase();
 await Batch.syncIndexes();
+await ClassSeat.syncIndexes();
 await User.create({ username: "admin", email: ADMIN, password: "x", power: "admin", role: "admin", locCode: "858" });
 await User.create({ username: "staff", email: STAFF, password: "x", power: "normal", role: "store_user", locCode: "T02" });
 await Store.create({ name: "Warehouse", locCode: "858" });
@@ -215,6 +218,88 @@ r = await quiet(() => call(deleteRepack, { params: { id: String(rp2._id) }, quer
 eq("repack delete refused once its packs are sold", [r.status, await stockOf(box._id)], [409, 40]);
 r = await call(searchRepackItems, { query: { userId: ADMIN, locCode: "858", search: "red" } });
 eq("repack item search: variant with group, stock and cost", r.body.items.map((i) => [i.name, i.stock, i.cost]), [["Ribbons · Red", 30, 2]]);
+
+// ═══ F20 Classes, tutors and bookings ═══
+const MGR = "mgr2@test.local";
+await User.create({ username: "mgr2", email: MGR, password: "x", power: "normal", role: "store_manager", locCode: "T02" });
+r = await call(createTutor, { body: { userId: STAFF, locCode: "T02", name: "Meera" } });
+eq("tutor: store user cannot add", r.status, 403);
+r = await call(createTutor, { body: { userId: MGR, name: "Meera Nair", expertise: "Kundan jewellery", phone: "+91 98470 33333", email: "bad-email", internalOrExternal: "external" } });
+eq("tutor: bad email refused", r.status, 400);
+r = await call(createTutor, { body: { userId: MGR, name: "Meera Nair", expertise: "Kundan jewellery", phone: "+91 98470 33333", internalOrExternal: "external" } });
+const tutor = r.body;
+eq("tutor: manager adds for own store, phone normalised", [r.status, tutor.locCode, tutor.phone], [201, "T02", "9847033333"]);
+const otherTutor = (await call(createTutor, { body: { userId: ADMIN, locCode: "858", name: "Ravi" } })).body;
+
+const klass = (extra = {}) => ({ userId: MGR, name: "Beginner kundan", type: "workshop", maxParticipants: 2, pricingType: "per_session", price: 1500, date: day(2), time: "16:00", durationMinutes: 90, recurring: "weekly", endDate: day(30), tutorId: String(tutor._id), ...extra });
+r = await call(createClass, { body: klass({ time: "4pm" }) });
+eq("class: bad time refused", r.status, 400);
+r = await call(createClass, { body: klass({ tutorId: String(otherTutor._id) }) });
+eq("class: tutor from another store refused", r.status, 400);
+r = await call(createClass, { body: klass() });
+const cls = r.body;
+eq("class: created with tutor", [r.status, cls.tutorName, cls.locCode], [201, "Meera Nair", "T02"]);
+r = await call(listClasses, { query: { userId: STAFF } });
+eq("class list: next occurrence with seats", [r.body.classes.length, r.body.classes[0].next.date, r.body.classes[0].next.left], [1, day(2), 2]);
+r = await call(getClass, { params: { id: String(cls._id) }, query: { userId: STAFF } });
+eq("class page: weekly occurrences until the end date", r.body.occurrences.map((o) => o.date).slice(0, 2), [day(2), day(9)]);
+
+const book = (phone, name, extra = {}) => call(createBooking, { body: { userId: STAFF, classId: String(cls._id), date: day(2), phone, name, ...extra } });
+r = await book("98470 44444", "Anjali");
+const b1 = r.body;
+eq("booking: customer found or added by phone, class price", [r.status, b1.number, b1.customerPhone, b1.price, b1.status], [201, "BK-000001", "9847044444", 1500, "booked"]);
+r = await book("9847044444", "Anjali");
+eq("booking: same customer twice refused", r.status, 409);
+r = await book("9847055555", "Bindu");
+eq("booking: second seat", r.status, 201);
+r = await book("9847066666", "Chitra");
+eq("booking: full at the maximum", [r.status, r.body.message], [409, `Beginner kundan is full on ${day(2)} (maximum 2).`]);
+r = await book("9847066666", "Chitra", { date: day(3) });
+eq("booking: a day the class does not run", r.status, 400);
+r = await call(createBooking, { body: { userId: ADMIN, classId: String(cls._id), date: day(9), phone: "9847066666", name: "Chitra" } });
+eq("booking: next week's class has its own seats", r.status, 201);
+r = await call(listBookings, { query: { userId: STAFF, classId: String(cls._id), date: day(2) } });
+eq("booking list for one class day", r.body.bookings.map((x) => x.customerName).sort(), ["Anjali", "Bindu"]);
+r = await call(listBookings, { query: { userId: STAFF, search: "98470 55555" } });
+eq("booking search by phone", r.body.bookings.map((x) => x.customerName), ["Bindu"]);
+
+// Cancel frees the seat; un-cancelling needs a free seat; attended only from the class day
+r = await call(changeBookingStatus, { params: { id: String(b1._id) }, body: { userId: STAFF, status: "attended" } });
+eq("attended cannot be marked before the class day", r.status, 400);
+r = await call(changeBookingStatus, { params: { id: String(b1._id) }, body: { userId: STAFF, status: "cancelled" } });
+eq("cancel frees the seat", [r.status, r.body.status, (await ClassSeat.findOne({ classId: cls._id, date: day(2) }).lean()).booked], [200, "cancelled", 1]);
+r = await book("9847066666", "Chitra");
+eq("the freed seat can be booked", r.status, 201);
+r = await call(changeBookingStatus, { params: { id: String(b1._id) }, body: { userId: STAFF, status: "booked" } });
+eq("un-cancelling when full is refused", [r.status, (await ClassSeat.findOne({ classId: cls._id, date: day(2) }).lean()).booked], [409, 2]);
+
+// Two people booking the last seat at once: one gets it
+const tiny = (await call(createClass, { body: klass({ name: "One-to-one", maxParticipants: 1, recurring: "none", endDate: "" }) })).body;
+const race = await Promise.all([
+  call(createBooking, { body: { userId: STAFF, classId: String(tiny._id), date: day(2), phone: "9847077777", name: "Devi" } }),
+  call(createBooking, { body: { userId: STAFF, classId: String(tiny._id), date: day(2), phone: "9847088888", name: "Esha" } }),
+]);
+eq("last seat race: one booked, one refused", race.map((x) => x.status).sort(), [201, 409]);
+eq("seat count never exceeds the maximum", (await ClassSeat.findOne({ classId: tiny._id, date: day(2) }).lean()).booked, 1);
+
+// Membership pricing
+const mem = (await call(createClass, { body: klass({ name: "Members' polishing", pricingType: "membership", price: 300, maxParticipants: 5, recurring: "none", endDate: "" }) })).body;
+r = await call(createBooking, { body: { userId: STAFF, classId: String(mem._id), date: day(2), phone: "9847099999", name: "Farah", membership: "MEM-12" } });
+eq("membership booking is covered (₹0)", [r.status, r.body.price, r.body.membership], [201, 0, "MEM-12"]);
+r = await call(createBooking, { body: { userId: STAFF, classId: String(mem._id), date: day(2), phone: "9847012121", name: "Gita" } });
+eq("without a membership the class price applies", r.body.price, 300);
+
+// Edits that would strand bookings or overfill a day are refused
+r = await call(updateClass, { params: { id: String(cls._id) }, body: { userId: MGR, recurring: "none" } });
+eq("schedule change leaving bookings behind → 409", r.status, 409);
+r = await call(updateClass, { params: { id: String(cls._id) }, body: { userId: MGR, maxParticipants: 1 } });
+eq("maximum below current bookings → 409", r.status, 409);
+r = await call(updateClass, { params: { id: String(cls._id) }, body: { userId: MGR, name: "Beginner kundan (Sat)", maxParticipants: 3 } });
+eq("plain edit", [r.status, r.body.name, r.body.maxParticipants], [200, "Beginner kundan (Sat)", 3]);
+r = await call(updateClass, { params: { id: String(cls._id) }, body: { userId: STAFF, name: "x" } });
+eq("store user cannot edit classes", r.status, 403);
+r = await call(listClasses, { query: { userId: ADMIN, locCode: "858" } });
+eq("classes are per store", r.body.classes.length, 0);
 
 // ═══ (later features add their checks above this line) ═══
 
