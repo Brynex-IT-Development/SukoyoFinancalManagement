@@ -1,5 +1,5 @@
 // Shared bits for the vendor reports (F10): store choice, print header, CSV/print buttons.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CSVLink } from "react-csv";
 import { Download, Printer } from "lucide-react";
 import useCompanyProfile, { companyAddressLine } from "../../hooks/useCompanyProfile";
@@ -13,19 +13,23 @@ export const todayIST = () => new Date().toLocaleDateString("en-CA", { timeZone:
  * allowed stores (or all of them); everyone else is fixed to their own store. The server
  * applies the same scope whatever is sent.
  */
-export const useStoreChoice = () => {
+export const useStoreChoice = ({ allowAll = true } = {}) => {
   const user = getCurrentUser();
   const admin = isAdminUser(user);
   const cluster = (user.role || "").toLowerCase() === "cluster_manager";
   const allowed = (user.allowedLocCodes || []).map(String);
   const { stores } = useActiveStores();
-  const [locCode, setLocCode] = useState(admin || cluster ? "" : String(user.locCode || ""));
+  const [locCode, setLocCode] = useState(admin || cluster ? (allowAll ? "" : String(user.locCode || "")) : String(user.locCode || ""));
   const options = useMemo(() => {
     const list = (stores || []).filter((s) => admin || (cluster ? allowed.includes(String(s.locCode)) : String(s.locCode) === String(user.locCode)))
       .map((s) => ({ value: String(s.locCode), label: s.locName || s.name || String(s.locCode) }));
     if (!admin && !cluster && user.locCode && !list.some((o) => o.value === String(user.locCode))) list.push({ value: String(user.locCode), label: String(user.locCode) });
-    return admin || cluster ? [{ value: "", label: admin ? "All stores" : "All my stores" }, ...list] : list;
+    return (admin || cluster) && allowAll ? [{ value: "", label: admin ? "All stores" : "All my stores" }, ...list] : list;
   }, [stores]); // eslint-disable-line react-hooks/exhaustive-deps
+  // One-store pages: once the list is known, fall back to its first store if the user's own is not in it
+  useEffect(() => {
+    if (!allowAll && options.length && !options.some((o) => o.value === locCode)) setLocCode(options[0].value);
+  }, [options]); // eslint-disable-line react-hooks/exhaustive-deps
   const selected = options.find((o) => o.value === locCode);
   return {
     locCode, setLocCode, options, canChoose: admin || cluster,

@@ -35,7 +35,8 @@ import {
     Wallet,
     Gift,
     Ticket,
-    Building
+    Building,
+    CalendarCheck
 } from "lucide-react";
 import salesInventoryAccessConfig from "../config/salesInventoryAccess.json";
 import baseUrl from "../api/api.js";
@@ -235,6 +236,9 @@ const Nav = () => {
         if (activePath.startsWith("/offers")) {
             return "offers";
         }
+        if (activePath.startsWith("/staff")) {
+            return "staff";
+        }
         if (activePath.startsWith("/purchase")) {
             return "purchase";
         }
@@ -256,6 +260,7 @@ const Nav = () => {
     const isPurchaseOpen = openSection === "purchase";
     const isManageUsersOpen = openSection === "manageUsers";
     const isOffersOpen = openSection === "offers";
+    const isStaffOpen = openSection === "staff";
 
     const inventoryLinks = [
         { to: "/shoe-sales/items", label: "Items", Icon: List },
@@ -286,6 +291,14 @@ const Nav = () => {
             : []),
     ];
     const isOffersActive = activePath.startsWith("/offers");
+    // Staff (F15): attendance screens
+    const staffLinks = [
+        { to: "/staff/attendance/mark", label: "Mark Attendance" },
+        { to: "/staff/attendance/daily", label: "Daily Attendance" },
+        { to: "/staff/attendance/monthly", label: "Monthly Attendance" },
+        { to: "/staff/attendance/person", label: "Staff Member" },
+    ];
+    const isStaffActive = activePath.startsWith("/staff");
     const isInventoryActive = inventoryLinks.some((link) => link.to === activePath) ||
         activePath.startsWith("/shoe-sales/items") ||
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/item-groups")) ||
@@ -522,6 +535,24 @@ const Nav = () => {
                                         )}
                                     </div>
                                 )}
+
+                                {/* Staff: attendance */}
+                                <div>
+                                    <button onClick={() => setOpenSection(isStaffOpen ? null : "staff")} className={groupButtonClasses(isStaffOpen, isStaffActive)}>
+                                        <div className="flex w-full items-center gap-3.5">
+                                            <CalendarCheck size={18} className="shrink-0" />
+                                            <span className="flex-1 text-left whitespace-nowrap truncate">Staff</span>
+                                            <ChevronDown size={16} className={`shrink-0 transition-transform ${isStaffOpen ? "rotate-180" : "rotate-0"} ${isStaffActive ? "text-white" : "text-zinc-400 group-hover:text-white"}`} />
+                                        </div>
+                                    </button>
+                                    {isStaffOpen && (
+                                        <div className="mt-1 space-y-0.5 border-l border-[#27272a] ml-[25px]">
+                                            {staffLinks.map(({ to, label }) => (
+                                                <Link key={to} to={to} className={subLinkClasses(to)}><span>{label}</span></Link>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
 
                                 {/* Offers: gift cards, vouchers, loyalty settings */}
                                 {hasSalesInventoryAccess && (

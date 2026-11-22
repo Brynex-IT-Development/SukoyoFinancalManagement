@@ -87,6 +87,7 @@ import VendorOutstanding from "./pages/VendorOutstanding.jsx";
 import VendorAging from "./pages/VendorAging.jsx";
 import VendorStatement from "./pages/VendorStatement.jsx";
 import StockHealth from "./pages/StockHealth.jsx";
+import Attendance from "./pages/Attendance.jsx";
 import PurchaseReports from "./pages/PurchaseReports.jsx";
 import BillWiseProfit from "./pages/BillWiseProfit.jsx";
 import ProfitLoss from "./pages/ProfitLoss.jsx";
@@ -316,6 +317,8 @@ const App = () => {
           <Route path="/reports/vendor-aging" element={currentuser ? <VendorAging /> : <Navigate to="/login" />} />
           <Route path="/reports/vendor-statement" element={currentuser ? <VendorStatement /> : <Navigate to="/login" />} />
           <Route path="/reports/stock-health" element={currentuser ? <StockHealth /> : <Navigate to="/login" />} />
+          <Route path="/staff/attendance" element={currentuser ? <Navigate to="/staff/attendance/mark" replace /> : <Navigate to="/login" />} />
+          <Route path="/staff/attendance/:view" element={currentuser ? <Attendance /> : <Navigate to="/login" />} />
           <Route path="/reports/purchases" element={currentuser ? <PurchaseReports /> : <Navigate to="/login" />} />
           <Route path="/reports/bill-profit" element={currentuser ? <BillWiseProfit /> : <Navigate to="/login" />} />
           <Route path="/reports/profit-loss" element={currentuser ? <ProfitLoss /> : <Navigate to="/login" />} />
