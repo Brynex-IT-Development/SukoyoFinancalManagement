@@ -90,6 +90,7 @@ import StockHealth from "./pages/StockHealth.jsx";
 import Attendance from "./pages/Attendance.jsx";
 import Enquiries from "./pages/Enquiries.jsx";
 import EnquiryDetail from "./pages/EnquiryDetail.jsx";
+import BankAccounts from "./pages/BankAccounts.jsx";
 import PurchaseReports from "./pages/PurchaseReports.jsx";
 import BillWiseProfit from "./pages/BillWiseProfit.jsx";
 import ProfitLoss from "./pages/ProfitLoss.jsx";
@@ -323,6 +324,7 @@ const App = () => {
           <Route path="/staff/attendance/:view" element={currentuser ? <Attendance /> : <Navigate to="/login" />} />
           <Route path="/sales/enquiries" element={currentuser ? <Enquiries /> : <Navigate to="/login" />} />
           <Route path="/sales/enquiries/:id" element={currentuser ? <EnquiryDetail /> : <Navigate to="/login" />} />
+          <Route path="/bank-accounts" element={currentuser ? <BankAccounts /> : <Navigate to="/login" />} />
           <Route path="/reports/purchases" element={currentuser ? <PurchaseReports /> : <Navigate to="/login" />} />
           <Route path="/reports/bill-profit" element={currentuser ? <BillWiseProfit /> : <Navigate to="/login" />} />
           <Route path="/reports/profit-loss" element={currentuser ? <ProfitLoss /> : <Navigate to="/login" />} />

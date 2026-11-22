@@ -36,7 +36,8 @@ import {
     Gift,
     Ticket,
     Building,
-    CalendarCheck
+    CalendarCheck,
+    Landmark
 } from "lucide-react";
 import salesInventoryAccessConfig from "../config/salesInventoryAccess.json";
 import baseUrl from "../api/api.js";
@@ -655,6 +656,9 @@ const Nav = () => {
                                 <Link to="/income" className={singleLinkClasses("/income")}><DollarSign size={18} className="shrink-0" /><span>Income</span></Link>
                                 <Link to="/record-expense" className={singleLinkClasses("/record-expense")}><Wallet size={18} className="shrink-0" /><span>Record Expense</span></Link>
                                 <Link to="/expenses" className={singleLinkClasses("/expenses")}><DollarSign size={18} className="shrink-0" /><span>All Expenses</span></Link>
+                                {(currentuser?.power === 'admin' || currentuser?.role === 'admin' || currentuser?.role === 'superadmin') && (
+                                    <Link to="/bank-accounts" className={singleLinkClasses("/bank-accounts")}><Landmark size={18} className="shrink-0" /><span>Bank Accounts</span></Link>
+                                )}
 
                                 {/* Admin only */}
                                 {(currentuser?.power === 'admin' || currentuser?.locCode === '102') && (

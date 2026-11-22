@@ -39,6 +39,7 @@ import PurchaseReportRoutes from "./route/PurchaseReportRoutes.js";
 import StockHealthRoutes from "./route/StockHealthRoutes.js";
 import AttendanceRoutes from "./route/AttendanceRoutes.js";
 import EnquiryRoutes from "./route/EnquiryRoutes.js";
+import BankRoutes from "./route/BankRoutes.js";
 import setupSwagger   from "./swagger.js";
 
 const env     = process.env.NODE_ENV || "development";
@@ -144,6 +145,7 @@ app.use("/api",     PurchaseReportRoutes);
 app.use("/api",     StockHealthRoutes);
 app.use("/api",     AttendanceRoutes);
 app.use("/api",     EnquiryRoutes);
+app.use("/api",     BankRoutes);
 
 // Test route to verify server is running
 app.get("/api/test", (_req, res) => {

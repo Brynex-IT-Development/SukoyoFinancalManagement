@@ -13,6 +13,8 @@ import {
 } from "../controllers/AttendanceController.js";
 import Enquiry from "../model/Enquiry.js";
 import { listEnquiries, createEnquiry, getEnquiry, updateEnquiry, changeEnquiryStatus, searchEnquiryItems } from "../controllers/EnquiryController.js";
+import BankAccount from "../model/BankAccount.js";
+import { listBankAccounts, createBankAccount, getBankAccount, updateBankAccount, listBankTransfers, createBankTransfer } from "../controllers/BankController.js";
 import { istDateString } from "../utils/ist.js";
 import { workingDaysOf } from "../utils/attendance.js";
 
@@ -39,6 +41,7 @@ await mongoose.connect(uri);
 const db = mongoose.connection.db;
 await db.dropDatabase();
 await Attendance.syncIndexes();
+await BankAccount.syncIndexes();
 await User.create({ username: "admin", email: ADMIN, password: "x", power: "admin", role: "admin", locCode: "T01" });
 await User.create({ username: "mgr1", email: MGR1, password: "x", power: "normal", role: "store_manager", locCode: "T01" });
 await User.create({ username: "user1", email: USER1, password: "x", power: "normal", role: "store_user", locCode: "T01" });
@@ -241,6 +244,68 @@ r = await call(searchEnquiryItems, { query: { userId: USER1, search: "ring" } })
 eq("item search: standalone items and variants", r.body.items.map((i) => i.name).sort(), ["Gold Ring 22K"]);
 r = await call(searchEnquiryItems, { query: { userId: USER1, search: "ruby" } });
 eq("item search: group variant with its group", r.body.items.map((i) => [i.name, i.group]), [["Ruby Bangle", "Bangles"]]);
+
+// ═══ F17 Bank accounts and transfers ═══
+r = await call(listBankAccounts, { query: { userId: MGR1 } });
+eq("bank: store manager cannot see accounts", r.status, 403);
+r = await call(createBankAccount, { body: { userId: MGR1, bankName: "SBI", accountHolder: "Shop", accountNumber: "123456789012" } });
+eq("bank: store manager cannot add accounts", r.status, 403);
+r = await call(createBankAccount, { body: { userId: ADMIN, bankName: "SBI", accountHolder: "Shop", accountNumber: "1234 5678 9012", ifsc: "SBIN1070123" } });
+eq("bank: bad IFSC refused", r.status, 400);
+r = await call(createBankAccount, { body: { userId: ADMIN, bankName: "SBI", accountHolder: "Shop Pvt Ltd", accountNumber: "1234 5678 9012", ifsc: "sbin0070123", branch: "MG Road", upiId: "shop@sbi", openingBalance: "50000" } });
+const sbi = r.body;
+eq("bank: account added, balance = opening, number masked", [r.status, sbi.balance, sbi.accountNumberMasked, sbi.ifsc, sbi.accountNumber], [201, 50000, "••••••••9012", "SBIN0070123", undefined]);
+r = await call(createBankAccount, { body: { userId: ADMIN, bankName: "SBI", accountHolder: "Again", accountNumber: "123456789012", ifsc: "SBIN0070123" } });
+eq("bank: same account twice refused", r.status, 409);
+r = await call(createBankAccount, { body: { userId: ADMIN, bankName: "HDFC", accountHolder: "Shop Pvt Ltd", accountNumber: "50100200300", ifsc: "HDFC0001234" } });
+const hdfc = r.body;
+eq("bank: second account with no opening balance", [r.status, hdfc.balance], [201, 0]);
+r = await call(getBankAccount, { params: { id: String(sbi._id) }, query: { userId: ADMIN } });
+eq("bank: full number on the account page (for editing)", r.body.accountNumber, "123456789012");
+
+const bal = async (a) => (await BankAccount.findById(a._id).lean()).balance;
+const transfer = (amount, extra = {}) => call(createBankTransfer, { body: { userId: ADMIN, fromAccountId: String(sbi._id), toAccountId: String(hdfc._id), amount, date: todayDay, ...extra } });
+r = await transfer("20000.50", { notes: "Move for supplier payments" });
+eq("transfer: SBI → HDFC ₹20,000.50", [r.status, r.body.transfer.number, await bal(sbi), await bal(hdfc)], [201, "BT-000001", 29999.5, 20000.5]);
+r = await transfer("100", { toAccountId: String(sbi._id) });
+eq("transfer: same account refused", r.status, 400);
+r = await transfer("0");
+eq("transfer: zero refused", r.status, 400);
+r = await transfer("1.234");
+eq("transfer: more than 2 decimals refused", r.status, 400);
+r = await transfer("10", { date: "2099-01-01" });
+eq("transfer: future date refused", r.status, 400);
+r = await transfer("40000");
+eq("transfer: not enough balance → 409, nothing moved", [r.status, r.body.message, await bal(sbi), await bal(hdfc)],
+  [409, "Not enough balance in SBI · ••••••••9012: ₹29,999.50 available, ₹40,000.00 asked.", 29999.5, 20000.5]);
+// Two transfers of ₹20,000 at once: only one fits in ₹29,999.50
+const both = await Promise.all([transfer("20000"), transfer("20000")]);
+eq("transfer race: one succeeds, one refused, never negative", [both.map((x) => x.status).sort(), await bal(sbi), await bal(hdfc)], [[201, 409], 9999.5, 40000.5]);
+// The increment fails (e.g. the account was just made inactive) → the decrement is rolled back
+const realUpdateOne = BankAccount.updateOne.bind(BankAccount);
+let n = 0;
+BankAccount.updateOne = (...args) => (++n === 2 ? Promise.resolve({ matchedCount: 0, modifiedCount: 0 }) : realUpdateOne(...args));
+try { r = await transfer("500"); } finally { BankAccount.updateOne = realUpdateOne; }
+eq("transfer: receiving side fails → 409 and SBI gets its ₹500 back", [r.status, await bal(sbi), await bal(hdfc)], [409, 9999.5, 40000.5]);
+await call(updateBankAccount, { params: { id: String(hdfc._id) }, body: { userId: ADMIN, active: false } });
+r = await transfer("100");
+eq("transfer: to an inactive account refused", r.status, 409);
+await call(updateBankAccount, { params: { id: String(hdfc._id) }, body: { userId: ADMIN, active: true } });
+
+// Opening balance edits move the balance by the same amount, never below zero
+r = await call(updateBankAccount, { params: { id: String(sbi._id) }, body: { userId: ADMIN, openingBalance: "30000" } });
+eq("opening balance cut that would make the balance negative → 409", [r.status, await bal(sbi)], [409, 9999.5]);
+r = await call(updateBankAccount, { params: { id: String(sbi._id) }, body: { userId: ADMIN, openingBalance: "45000" } });
+eq("opening balance 50,000 → 45,000 moves the balance by −5,000", [r.status, r.body.openingBalance, r.body.balance], [200, 45000, 4999.5]);
+r = await call(updateBankAccount, { params: { id: String(sbi._id) }, body: { userId: ADMIN, branch: "$balance" } });
+eq("text that looks like a field path is saved as text", [r.status, r.body.branch, r.body.balance], [200, "$balance", 4999.5]);
+
+r = await call(listBankAccounts, { query: { userId: ADMIN } });
+eq("account list: masked numbers and the total balance", [r.body.accounts.map((a) => a.accountNumberMasked), r.body.accounts.some((a) => a.accountNumber), r.body.totalBalance], [["•••••••0300", "••••••••9012"], false, 45000]);
+r = await call(listBankTransfers, { query: { userId: ADMIN, accountId: String(hdfc._id) } });
+eq("transfer list by account", [r.body.transfers.length, r.body.total], [2, 40000.5]);
+r = await call(listBankTransfers, { query: { userId: ADMIN, fromDate: "2020-01-01", toDate: "2020-12-31" } });
+eq("transfer list by date", r.body.transfers.length, 0);
 
 // ═══ (later features add their checks above this line) ═══
 
