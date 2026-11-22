@@ -282,6 +282,7 @@ const Nav = () => {
         { to: "/sales/returns", label: "Invoice Return", Icon: RotateCcw },
         { to: "/sales/customers", label: "Customers", Icon: Users },
         { to: "/sales/credit-notes", label: "Store Credit", Icon: ReceiptText },
+        { to: "/sales/enquiries", label: "Enquiries", Icon: ClipboardList },
     ];
     const offersLinks = [
         { to: "/offers/gift-cards", label: "Gift Cards", Icon: Gift },
@@ -305,7 +306,7 @@ const Nav = () => {
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/inactive")) ||
         activePath.startsWith("/inventory/store-orders");
     const isSalesActive = salesLinks.some((link) => link.to === activePath) ||
-        activePath.startsWith("/sales/customers") || activePath.startsWith("/sales/credit-notes");
+        activePath.startsWith("/sales/customers") || activePath.startsWith("/sales/credit-notes") || activePath.startsWith("/sales/enquiries");
     const purchaseLinks = [
         { to: "/purchase/orders", label: "Purchase Orders", Icon: ClipboardList },
         { to: "/purchase/receives", label: "Purchase Receives", Icon: PackageCheck },

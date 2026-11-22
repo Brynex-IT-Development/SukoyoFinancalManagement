@@ -11,6 +11,8 @@ import SalesPerson from "../model/SalesPerson.js";
 import {
   getAttendanceSettings, updateAttendanceSettings, getDayAttendance, saveAttendance, getMonthAttendance, getStaffMonth, getStaffList,
 } from "../controllers/AttendanceController.js";
+import Enquiry from "../model/Enquiry.js";
+import { listEnquiries, createEnquiry, getEnquiry, updateEnquiry, changeEnquiryStatus, searchEnquiryItems } from "../controllers/EnquiryController.js";
 import { istDateString } from "../utils/ist.js";
 import { workingDaysOf } from "../utils/attendance.js";
 
@@ -159,6 +161,86 @@ r = await call(getStaffList, { query: { userId: MGR1 } });
 eq("staff list: active staff of the store", r.body.staff.map((s) => s.name), ["Anu", "Binu Raj"]);
 r = await call(getStaffList, { query: { userId: MGR1, all: "1" } });
 eq("staff list with inactive", r.body.staff.map((s) => s.name), ["Anu", "Binu Raj", "Cini"]);
+
+// ═══ F16 Enquiries ═══
+await db.collection("salesinvoices").insertMany([
+  { invoiceNumber: "INV-77", invoiceDate: new Date(), customer: "Meera", category: "Sales", status: "sent", finalTotal: 5000, locCode: "T01", userId: ADMIN, lineItems: [] },
+  { invoiceNumber: "RTN-5", invoiceDate: new Date(), customer: "Meera", category: "Return", status: "sent", finalTotal: -500, locCode: "T01", userId: ADMIN, lineItems: [] },
+  { invoiceNumber: "INV-99", invoiceDate: new Date(), customer: "Other", category: "Sales", status: "sent", finalTotal: 900, locCode: "T02", userId: ADMIN, lineItems: [] },
+]);
+await db.collection("shoeitems").insertOne({ itemName: "Gold Ring 22K", sku: "GR-22", category: "other" });
+await db.collection("itemgroups").insertOne({ name: "Bangles", items: [{ _id: new mongoose.Types.ObjectId(), name: "Ruby Bangle", sku: "RB-1" }] });
+
+r = await call(createEnquiry, { body: { userId: USER1, customerName: "Meera", phone: "+91 98470 12345", itemWanted: "22K ring, size 14", staffId: A, followUpDate: "" } });
+const enq1 = r.body;
+eq("enquiry: store user creates for own store, phone normalised, numbered", [r.status, enq1.locCode, enq1.phone, enq1.number, enq1.staffName], [201, "T01", "9847012345", "ENQ-000001", "Anu"]);
+eq("enquiry: creation is the first history entry", enq1.history.map((h) => [h.status, h.note, h.by]), [["new", "Enquiry taken", USER1]]);
+r = await call(createEnquiry, { body: { userId: USER1, customerName: "X", phone: "123", itemWanted: "ring" } });
+eq("enquiry: invalid phone refused", [r.status, r.body.message], [400, "Enter a valid phone number."]);
+r = await call(createEnquiry, { body: { userId: USER1, customerName: "X", phone: "9847012345", itemWanted: " " } });
+eq("enquiry: item wanted required", r.status, 400);
+r = await call(createEnquiry, { body: { userId: USER1, customerName: "X", phone: "9847012345", itemWanted: "ring", staffId: D } });
+eq("enquiry: staff from another store refused", [r.status, r.body.message], [400, "That staff member does not work at this store."]);
+r = await call(createEnquiry, { body: { userId: ADMIN, customerName: "Ravi", phone: "9847099999", itemWanted: "chain" } });
+eq("enquiry: admin must choose the store", r.status, 400);
+const yesterday = istDateString(new Date(Date.now() - 86400000)), todayDay = istDateString();
+r = await call(createEnquiry, { body: { userId: ADMIN, locCode: "T02", customerName: "Ravi", phone: "9847099999", itemWanted: "silver chain", followUpDate: yesterday } });
+const enq2 = r.body;
+eq("enquiry: admin creates for Store Two", [r.status, enq2.number, enq2.locCode], [201, "ENQ-000002", "T02"]);
+r = await call(createEnquiry, { body: { userId: USER1, locCode: "T02", customerName: "Y", phone: "9847011111", itemWanted: "ring" } });
+eq("enquiry: store user cannot create for another store", r.status, 403);
+r = await call(getEnquiry, { params: { id: String(enq1._id) }, query: { userId: MGR2 } });
+eq("enquiry: other store cannot open it", r.status, 403);
+r = await call(listEnquiries, { query: { userId: USER1 } });
+eq("enquiry list: store user sees own store only", r.body.rows.map((x) => x.number), ["ENQ-000001"]);
+r = await call(listEnquiries, { query: { userId: ADMIN } });
+eq("enquiry list: admin sees all; overdue follow-up flagged", [r.body.rows.length, r.body.rows.find((x) => x.number === "ENQ-000002").followUp, r.body.overdue], [2, "overdue", 1]);
+
+// Status changes append history; follow-up due today
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "contacted", note: "Called, will visit", followUpDate: todayDay } });
+eq("status change appends history", [r.status, r.body.status, r.body.history.length, r.body.history[1].note], [200, "contacted", 2, "Called, will visit"]);
+r = await call(listEnquiries, { query: { userId: ADMIN, due: "today" } });
+eq("filter: follow-up due today", r.body.rows.map((x) => x.number), ["ENQ-000001"]);
+r = await call(listEnquiries, { query: { userId: ADMIN, due: "overdue" } });
+eq("filter: overdue", r.body.rows.map((x) => x.number), ["ENQ-000002"]);
+r = await call(listEnquiries, { query: { userId: ADMIN, due: "due" } });
+eq("filter: due today or overdue", r.body.rows.map((x) => x.number).sort(), ["ENQ-000001", "ENQ-000002"]);
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "contacted" } });
+eq("same status without a note is refused", r.status, 400);
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "contacted", note: "Sent photos on WhatsApp" } });
+eq("a follow-up note on the same status is logged", [r.status, r.body.history.length], [200, 3]);
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "maybe" } });
+eq("unknown status refused", r.status, 400);
+
+// Conversion records the sale's invoice number
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "converted", invoiceNumber: "INV-404" } });
+eq("convert: unknown invoice refused", [r.status, r.body.message], [400, "No invoice INV-404 was found."]);
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "converted", invoiceNumber: "RTN-5" } });
+eq("convert: a return is not a sale", r.status, 400);
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "converted", invoiceNumber: "INV-99" } });
+eq("convert: another store's invoice refused", r.status, 403);
+r = await call(changeEnquiryStatus, { params: { id: String(enq1._id) }, body: { userId: USER1, status: "converted", invoiceNumber: "inv-77", note: "Bought the ring" } });
+eq("convert: invoice recorded, follow-up cleared, logged", [r.status, r.body.convertedInvoiceNumber, r.body.followUpDate, r.body.history[3].note], [200, "INV-77", "", "Bought the ring · Invoice INV-77"]);
+r = await call(listEnquiries, { query: { userId: ADMIN, due: "today" } });
+eq("converted enquiries leave the follow-up list", r.body.rows.length, 0);
+r = await call(listEnquiries, { query: { userId: ADMIN, status: "converted" } });
+eq("filter by status; counts per status", [r.body.rows.map((x) => x.number), r.body.counts], [["ENQ-000001"], { new: 1, contacted: 0, converted: 1, closed: 0 }]);
+r = await call(listEnquiries, { query: { userId: ADMIN, search: "98470 99999" } });
+eq("search by phone", r.body.rows.map((x) => x.number), ["ENQ-000002"]);
+r = await call(listEnquiries, { query: { userId: ADMIN, fromDate: "2020-01-01", toDate: "2020-12-31" } });
+eq("date filter", r.body.rows.length, 0);
+
+// Details edit (status cannot be changed this way); lost race on a status change
+r = await call(updateEnquiry, { params: { id: String(enq2._id) }, body: { userId: MGR2, itemWanted: "silver chain 20 inch", status: "closed" } });
+eq("edit details; status untouched", [r.status, r.body.itemWanted, r.body.status], [200, "silver chain 20 inch", "new"]);
+const realFindOneAndUpdate = Enquiry.findOneAndUpdate;
+Enquiry.findOneAndUpdate = () => ({ lean: async () => null });
+try { r = await call(changeEnquiryStatus, { params: { id: String(enq2._id) }, body: { userId: MGR2, status: "closed" } }); } finally { Enquiry.findOneAndUpdate = realFindOneAndUpdate; }
+eq("status change that lost a race → 409", r.status, 409);
+r = await call(searchEnquiryItems, { query: { userId: USER1, search: "ring" } });
+eq("item search: standalone items and variants", r.body.items.map((i) => i.name).sort(), ["Gold Ring 22K"]);
+r = await call(searchEnquiryItems, { query: { userId: USER1, search: "ruby" } });
+eq("item search: group variant with its group", r.body.items.map((i) => [i.name, i.group]), [["Ruby Bangle", "Bangles"]]);
 
 // ═══ (later features add their checks above this line) ═══
 
