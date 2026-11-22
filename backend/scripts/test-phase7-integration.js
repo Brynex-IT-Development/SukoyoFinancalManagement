@@ -13,6 +13,7 @@ import { createSalesInvoice, updateSalesInvoice, deleteSalesInvoice } from "../c
 import { createPurchaseReceive, deletePurchaseReceive } from "../controllers/PurchaseReceiveController.js";
 import { listItemBatches, expiringBatches, reconcileBatchesNow } from "../controllers/BatchController.js";
 import { resolveLine, moveStock, applyLines } from "../utils/stockService.js";
+import { createRepack, deleteRepack, listRepacks, getRepack, searchRepackItems } from "../controllers/RepackController.js";
 import { istDateString, addIstDays } from "../utils/ist.js";
 
 const uri = process.env.TEST_MONGODB_URI || "";
@@ -158,6 +159,62 @@ r = await call(expiringBatches, { query: { userId: STAFF, days: "365" } });
 eq("store user sees only their store's batches", [...new Set(r.body.rows.map((x) => x.warehouse))], ["Store Two"]);
 r = await sale([{ item: "Honey 250g", itemSku: "HON-1", itemData: { _id: H }, quantity: 9, rate: 120, amount: 1080 }]);
 eq("only 8 unexpired honey at Warehouse → selling 9 is refused", [r.status, String(r.body.message || "").includes("8 in unexpired batches (2 expired)")], [409, true]);
+
+// ═══ F19 Repacking ═══
+const mkStock = (q) => [{ warehouse: WH, stockOnHand: q, availableForSale: q, physicalStockOnHand: q, physicalAvailableForSale: q }];
+const tea = await ShoeItem.create({ itemName: "Loose Tea 1kg", sku: "TEA-L", category: "other", costPrice: 120, manageBatch: true, warehouseStocks: [] });
+const box = await ShoeItem.create({ itemName: "Gift Box", sku: "BOX-1", category: "other", costPrice: 5, warehouseStocks: mkStock(50) });
+const gift = await ShoeItem.create({ itemName: "Tea Gift Pack", sku: "TEA-G", category: "other", costPrice: 0, manageBatch: true, warehouseStocks: [] });
+const ribbonGroupId = new mongoose.Types.ObjectId(), redRibbon = new mongoose.Types.ObjectId();
+await db.collection("itemgroups").insertOne({ _id: ribbonGroupId, name: "Ribbons", items: [{ _id: redRibbon, name: "Red", sku: "RIB-RED", costPrice: 2, warehouseStocks: mkStock(30) }] });
+await moveStock(await resolveLine({ itemData: { _id: String(tea._id) } }), WH, 10, { batch: { batchNo: "T1", expDate: day(90), costPrice: 100 } });
+const groupStock = async () => (await db.collection("itemgroups").findOne({ _id: ribbonGroupId })).items[0].warehouseStocks[0].stockOnHand;
+const giftBatches = async () => Object.fromEntries((await Batch.find({ itemId: gift._id }).lean()).map((b) => [b.batchNo, [b.qty, b.expDate, b.costPrice]]));
+const repackBody = (extra = {}) => ({
+  userId: ADMIN, locCode: "858",
+  sources: [{ itemId: String(tea._id), qty: 10 }, { itemId: String(box._id), qty: 20 }, { itemId: String(redRibbon), itemGroupId: String(ribbonGroupId), qty: 5 }],
+  target: { itemId: String(gift._id), packs: 23 }, charges: 40, notes: "Diwali packs", ...extra,
+});
+// 10 tea × ₹100 (batch cost) + 20 boxes × ₹5 + 5 ribbons × ₹2 + ₹40 charges = ₹1,150 → 23 packs → ₹50 a pack
+r = await quiet(() => call(createRepack, { body: repackBody() }));
+const rp1 = r.body;
+eq("repack: cost per produced unit", [r.status, rp1.number, rp1.consumedCost, rp1.totalCost, rp1.unitCost], [201, "RPK-000001", 1110, 1150, 50]);
+eq("repack: sources consumed, packs produced", [await stockOf(tea._id), await stockOf(box._id), await groupStock(), await stockOf(gift._id)], [0, 30, 25, 23]);
+eq("repack: the pack batch carries the repack number, earliest source expiry and unit cost", await giftBatches(), { "RPK-000001": [23, day(90), 50] });
+eq("repack: source batch recorded", rp1.sources[0].batchAllocations.map((a) => [a.batchNo, a.qty]), [["T1", 10]]);
+r = await quiet(() => call(createRepack, { body: repackBody({ sources: [{ itemId: String(tea._id), qty: 1 }, { itemId: String(box._id), qty: 2 }] }) }));
+eq("repack: not enough stock → 409, nothing moved", [r.status, await stockOf(box._id), await stockOf(gift._id)], [409, 30, 23]);
+r = await call(createRepack, { body: repackBody({ target: { itemId: String(box._id), packs: 1 } }) });
+eq("repack: packed item cannot be a source", r.status, 400);
+r = await call(createRepack, { body: repackBody({ userId: STAFF }) });
+eq("repack: store user at another store → 403", r.status, 403);
+r = await call(createRepack, { body: repackBody({ userId: STAFF, locCode: "T02" }) });
+eq("repack: store user (not manager) at own store → 403", r.status, 403);
+// Producing fails (a batch number that already exists with another expiry) → the consumption is undone
+await moveStock(await resolveLine({ itemData: { _id: String(gift._id) } }), WH, 1, { batch: { batchNo: "CLASH", expDate: day(10) } });
+r = await quiet(() => call(createRepack, { body: repackBody({ sources: [{ itemId: String(box._id), qty: 4 }], target: { itemId: String(gift._id), packs: 2, batchNo: "CLASH", expDate: day(20) }, charges: 0 }) }));
+eq("repack: producing fails → boxes given back", [r.status, await stockOf(box._id), (await giftBatches()).CLASH[0]], [409, 30, 1]);
+await invariant("repack rollback (gift)", WH, "warehouse");
+
+// Deleting reverses both movements (packs out of their batch, sources back into theirs)
+r = await call(listRepacks, { query: { userId: STAFF } });
+eq("repack list: other store's repacks hidden", r.body.repacks.length, 0);
+r = await call(getRepack, { params: { id: String(rp1._id) }, query: { userId: ADMIN } });
+eq("repack detail", [r.body.number, r.body.target.packs, r.body.canDelete], ["RPK-000001", 23, true]);
+r = await call(deleteRepack, { params: { id: String(rp1._id) }, query: { userId: STAFF } });
+eq("repack delete is admin only", r.status, 403);
+r = await quiet(() => call(deleteRepack, { params: { id: String(rp1._id) }, query: { userId: ADMIN } }));
+eq("repack delete reverses both movements", [r.status, await stockOf(tea._id), await stockOf(box._id), await groupStock(), await stockOf(gift._id)], [200, 10, 50, 30, 1]);
+eq("repack delete: tea back in batch T1, pack batch emptied", [(await Batch.findOne({ itemId: tea._id, batchNo: "T1" }).lean()).qty, (await giftBatches())["RPK-000001"][0]], [10, 0]);
+// Packs already sold → cannot reverse
+r = await quiet(() => call(createRepack, { body: repackBody({ sources: [{ itemId: String(box._id), qty: 10 }], target: { itemId: String(gift._id), packs: 5 }, charges: 0 }) }));
+const rp2 = r.body;
+r = await sale([{ item: "Tea Gift Pack", itemSku: "TEA-G", itemData: { _id: String(gift._id) }, quantity: 6, rate: 99, amount: 594 }]);
+eq("sell 6 gift packs (5 new + 1 earlier)", r.status, 201);
+r = await quiet(() => call(deleteRepack, { params: { id: String(rp2._id) }, query: { userId: ADMIN } }));
+eq("repack delete refused once its packs are sold", [r.status, await stockOf(box._id)], [409, 40]);
+r = await call(searchRepackItems, { query: { userId: ADMIN, locCode: "858", search: "red" } });
+eq("repack item search: variant with group, stock and cost", r.body.items.map((i) => [i.name, i.stock, i.cost]), [["Ribbons · Red", 30, 2]]);
 
 // ═══ (later features add their checks above this line) ═══
 

@@ -270,6 +270,10 @@ const Nav = () => {
             { to: "/shoe-sales/item-groups", label: "Item Groups", Icon: Layers },
             { to: "/inventory/adjustments", label: "Inventory Adjustments", Icon: SlidersHorizontal },
         ] : []),
+        // Repacking (F19): admins, warehouse users and store managers
+        ...(currentuser.power === 'admin' || currentuser.power === 'warehouse' || currentuser.role === 'store_manager' ? [
+            { to: "/inventory/repacks", label: "Repacking", Icon: Package },
+        ] : []),
         { to: "/inventory/transfer-orders", label: "Transfer Orders", Icon: ArrowLeftRight },
         { to: "/inventory/store-orders", label: "Store Orders", Icon: ShoppingBasket },
         // Only show these for admin and warehouse users
@@ -301,7 +305,7 @@ const Nav = () => {
         { to: "/staff/attendance/person", label: "Staff Member" },
     ];
     const isStaffActive = activePath.startsWith("/staff");
-    const isInventoryActive = inventoryLinks.some((link) => link.to === activePath) ||
+    const isInventoryActive = inventoryLinks.some((link) => link.to === activePath) || activePath.startsWith("/inventory/repacks") ||
         activePath.startsWith("/shoe-sales/items") ||
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/item-groups")) ||
         ((currentuser?.power === 'admin' || currentuser?.power === 'warehouse' || isBridesBerry) && activePath.startsWith("/shoe-sales/inactive")) ||
