@@ -106,6 +106,10 @@ const salesInvoiceSchema = new mongoose.Schema(
         amount: Number,
         // Item cost at the time of sale (snapshot for profit reports)
         costPrice: Number,
+        // Batch-managed items (F18): the batch the cashier chose (empty = earliest expiry first),
+        // and the batches the stock was actually taken from (set by the server)
+        batchNo: String,
+        batchAllocations: [{ _id: false, batchNo: String, qty: Number, expDate: String, mfgDate: String, costPrice: Number }],
       },
     ],
     // ── Customer & redemptions (loyalty / store credit / gift card / voucher) ──

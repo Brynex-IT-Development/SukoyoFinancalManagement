@@ -353,6 +353,15 @@ const PurchaseReceiveCreate = () => {
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [selectedOrderData, setSelectedOrderData] = useState(null);
   const [orderItems, setOrderItems] = useState([]);
+  // Batch-managed items (F18): their lines ask for batch number and dates
+  const [batchManaged, setBatchManaged] = useState(() => new Set());
+  const batchIdsKey = orderItems.map((i) => i.itemId).filter(Boolean).join(",");
+  useEffect(() => {
+    if (!batchIdsKey) { setBatchManaged(new Set()); return; }
+    const u = (() => { try { return JSON.parse(localStorage.getItem("rootfinuser") || "{}"); } catch { return {}; } })();
+    fetch(`${API_URL}/api/batches/managed?ids=${encodeURIComponent(batchIdsKey)}&userId=${encodeURIComponent(u.email || u.username || "")}`)
+      .then((res) => (res.ok ? res.json() : { ids: [] })).then((d) => setBatchManaged(new Set(d.ids || []))).catch(() => setBatchManaged(new Set()));
+  }, [batchIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [loadingOrderDetails, setLoadingOrderDetails] = useState(false);
   
   // Rest of the form fields (shown after first 2 are filled)
@@ -815,6 +824,9 @@ const PurchaseReceiveCreate = () => {
                 quantityToReceive: parseFloat(item.quantityToReceive) || 0,
                 // Include itemGroupId if available (for items from groups)
                 itemGroupId: item.itemGroupId || null,
+                batchNo: item.batchNo || "",
+                mfgDate: item.mfgDate || "",
+                expDate: item.expDate || "",
               };
             });
             setOrderItems(items);
@@ -908,6 +920,10 @@ const PurchaseReceiveCreate = () => {
           quantityToReceive: parseFloat(item.quantityToReceive) || 0,
           // Include itemGroupId if available (for items from groups)
           itemGroupId: itemGroupId,
+          // Batch-managed items (F18): blank batch number = the receive number
+          batchNo: (item.batchNo || "").trim(),
+          mfgDate: item.mfgDate || "",
+          expDate: item.expDate || "",
         };
       });
       
@@ -1329,6 +1345,19 @@ const PurchaseReceiveCreate = () => {
                                 {item.itemDescription && (
                                   <div className="text-xs text-[#64748b] mt-1">
                                     {item.itemDescription}
+                                  </div>
+                                )}
+                                {batchManaged.has(String(item.itemId)) && (
+                                  <div className="mt-2 flex flex-wrap items-end gap-2">
+                                    <label className="text-[11px] text-[#64748b]">Batch no
+                                      <input value={item.batchNo || ""} onChange={(e) => handleItemChange(item.id, "batchNo", e.target.value)} placeholder="Receive no." className="block mt-0.5 w-28 h-8 px-2 border border-[#d1d5db] rounded text-xs uppercase" />
+                                    </label>
+                                    <label className="text-[11px] text-[#64748b]">Mfg date
+                                      <input type="date" value={item.mfgDate || ""} onChange={(e) => handleItemChange(item.id, "mfgDate", e.target.value)} className="block mt-0.5 h-8 px-2 border border-[#d1d5db] rounded text-xs" />
+                                    </label>
+                                    <label className="text-[11px] text-[#64748b]">Expiry date
+                                      <input type="date" value={item.expDate || ""} onChange={(e) => handleItemChange(item.id, "expDate", e.target.value)} className="block mt-0.5 h-8 px-2 border border-[#d1d5db] rounded text-xs" />
+                                    </label>
                                   </div>
                                 )}
                               </div>

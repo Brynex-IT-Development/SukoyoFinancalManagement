@@ -9,6 +9,7 @@
 import mongoose from "mongoose";
 import ShoeItem from "../model/ShoeItem.js";
 import ItemGroup from "../model/ItemGroup.js";
+import { isBatchManaged, moveBatched, normBatchNo, splitAllocations } from "./batches.js";
 
 export class StockError extends Error {
   constructor(message, details = {}) {
@@ -221,11 +222,29 @@ const newRow = (warehouse, qty) => ({
 });
 
 /**
- * Atomically move stock for one target in one warehouse.
+ * Move stock for one target in one warehouse.
  * delta < 0 removes stock and fails (StockError) if the warehouse does not hold enough.
  * delta > 0 adds stock, creating the warehouse row when it does not exist.
+ * For a batch-managed item (ShoeItem.manageBatch) its batches move with it (utils/batches.js):
+ *   opts.batchNo      take from this batch only (the cashier's choice)
+ *   opts.forSale      a sale: expired batches are never taken
+ *   opts.allocations  batches to put back into (or take first) — what a line moved earlier
+ *   opts.batch        { batchNo, expDate, mfgDate, costPrice, sellingPrice } a new batch (receive, repack)
+ * Returns { allocations } — the batches moved (null for items without batches).
  */
-export const moveStock = async (target, warehouse, delta) => {
+export const moveStock = async (target, warehouse, delta, opts = {}) => {
+  delta = Number(delta) || 0;
+  if (!delta) return { allocations: null };
+  const wh = (warehouse || "Warehouse").toString().trim();
+  if (target?.kind === "standalone" && (target.manageBatch ?? (await isBatchManaged(target.itemId)))) {
+    return moveBatched(target, wh, delta, opts, { rawMove: moveStockRaw, rawGetStock: getStock, whKey: warehouseKey(wh) || lower(wh), StockError });
+  }
+  await moveStockRaw(target, wh, delta);
+  return { allocations: null };
+};
+
+/** The stock-only movement (atomic $inc with arrayFilters). */
+const moveStockRaw = async (target, warehouse, delta) => {
   delta = Number(delta) || 0;
   if (!delta) return;
   const wh = (warehouse || "Warehouse").toString().trim();
@@ -283,23 +302,36 @@ export const moveStock = async (target, warehouse, delta) => {
  * All-or-nothing: if one line fails, every movement already made is undone and the error is thrown.
  * Returns the list of applied movements [{ target, warehouse, delta }].
  */
-export const applyLines = async (lines, warehouse, sign, { qtyField = "quantity" } = {}) => {
+export const applyLines = async (lines, warehouse, sign, { qtyField = "quantity", forSale = false } = {}) => {
+  // Batch-managed items (F18): a line's chosen batch (line.batchNo) is taken on its own; the batches
+  // taken are written back on each line as line.batchAllocations, and adding stock back for a line
+  // that has batchAllocations restores those batches. Items without batches are unaffected.
   const combined = new Map();
   for (const line of lines || []) {
     const qty = Math.abs(parseFloat(line?.[qtyField]) || 0);
     if (!qty) continue;
     const target = await resolveLine(line);
     if (!target) continue;
-    const prev = combined.get(target.key);
-    if (prev) prev.qty += qty;
-    else combined.set(target.key, { target, qty });
+    const batchNo = sign < 0 && line?.batchNo ? normBatchNo(line.batchNo) : "";
+    const key = batchNo ? `${target.key}#${batchNo}` : target.key;
+    const prev = combined.get(key);
+    if (prev) { prev.qty += qty; prev.lines.push({ line, qty }); }
+    else combined.set(key, { target, qty, batchNo, lines: [{ line, qty }] });
   }
 
   const applied = [];
   try {
-    for (const { target, qty } of combined.values()) {
-      await moveStock(target, warehouse, sign * qty);
-      applied.push({ target, warehouse, delta: sign * qty });
+    for (const { target, qty, batchNo, lines: group } of combined.values()) {
+      // Adding: restore the batches the lines came from. Removing: prefer the batches a line used
+      // before (an edited sale keeps its batches), the rest earliest-expiry first.
+      const allocations = batchNo ? [] : group.flatMap(({ line }) => (Array.isArray(line?.batchAllocations) ? line.batchAllocations : []));
+      const res = await moveStock(target, warehouse, sign * qty, {
+        forSale: forSale && sign < 0, batchNo: batchNo || undefined, allocations: allocations.length ? allocations : undefined,
+      });
+      applied.push({ target, warehouse, delta: sign * qty, allocations: res?.allocations || null });
+      if (sign < 0 && res?.allocations) {
+        splitAllocations(group.map((g) => g.qty), res.allocations).forEach((a, i) => { group[i].line.batchAllocations = a; });
+      }
     }
   } catch (err) {
     await undoMovements(applied);
@@ -308,11 +340,11 @@ export const applyLines = async (lines, warehouse, sign, { qtyField = "quantity"
   return applied;
 };
 
-/** Undo movements returned by applyLines (best effort, used for rollback). */
+/** Undo movements returned by applyLines (best effort, used for rollback). Batches go back where they came from. */
 export const undoMovements = async (applied = []) => {
   for (const m of [...applied].reverse()) {
     try {
-      await moveStock(m.target, m.warehouse, -m.delta);
+      await moveStock(m.target, m.warehouse, -m.delta, m.allocations ? { allocations: m.allocations } : {});
     } catch (e) {
       console.error(`❌ Stock rollback failed for "${m.target?.name}" at ${m.warehouse}:`, e.message);
     }

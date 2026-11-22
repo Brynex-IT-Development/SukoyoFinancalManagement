@@ -1,6 +1,7 @@
 import SalesInvoice from "../model/SalesInvoice.js";
 import { nextGlobalSalesInvoice } from "../utils/nextSalesInvoice.js";
 import { applyLines, undoMovements, StockError } from "../utils/stockService.js";
+import { returnAllocations } from "../utils/batches.js";
 import { checkAndCreateReorderAlerts } from "../utils/reorderNotification.js";
 import { updateMonthlyStockForSale } from "../utils/monthlyStockTracking.js";
 import Transaction from "../model/Transaction.js";
@@ -60,6 +61,22 @@ const isReturnCategory = (category) => RETURN_CATEGORIES.includes((category || "
 
 // The ONE rule for which warehouse an invoice moves stock in (create, edit and delete all use it).
 const invoiceWarehouse = (inv) => (inv?.stockWarehouse || inv?.warehouse || inv?.branch || "Warehouse").toString().trim();
+
+/**
+ * Batch-managed items (F18): a returned piece goes back into the batch it was sold from.
+ * Batch data sent by the client is ignored; it is taken from the original sale's lines.
+ */
+const fillReturnBatches = (lines, originalLines) => {
+  const keyOf = (l) => String(l?.itemData?._id || l?.itemSku || l?.item || "");
+  for (const line of lines || []) {
+    if (!line) continue;
+    delete line.batchAllocations;
+    delete line.batchNo;
+    const orig = originalLines.find((o) => keyOf(o) === keyOf(line) && Array.isArray(o.batchAllocations) && o.batchAllocations.length);
+    const qty = Math.abs(parseFloat(line.quantity) || 0);
+    if (orig && qty) line.batchAllocations = returnAllocations(orig.batchAllocations, qty);
+  }
+};
 
 // A sale takes stock out (-1); a return / refund / cancel puts it back (+1).
 const stockSign = (category) => (isReturnCategory(category) ? 1 : -1);
@@ -318,9 +335,10 @@ export const createSalesInvoice = async (req, res) => {
     // and nothing is changed — no more invoices saved with stock silently not deducted.
     const warehouse = invoiceWarehouse(invoiceData);
     const sign = stockSign(invoiceData.category);
+    if (isReturnInvoice) fillReturnBatches(invoiceData.lineItems, original?.lineItems || []);
     let movements = [];
     try {
-      movements = await applyLines(invoiceData.lineItems || [], warehouse, sign);
+      movements = await applyLines(invoiceData.lineItems || [], warehouse, sign, { forSale: !isReturnInvoice });
     } catch (err) {
       if (err instanceof StockError) return stockErrorResponse(res, err);
       throw err;
@@ -780,7 +798,7 @@ export const updateSalesInvoice = async (req, res) => {
       try {
         undoOld = await applyLines(oldInvoice.lineItems || [], oldWh, -stockSign(oldInvoice.category));
         try {
-          applyNew = await applyLines(newLines, newWh, stockSign(merged.category));
+          applyNew = await applyLines(newLines, newWh, stockSign(merged.category), { forSale: !isReturnCategory(merged.category) });
         } catch (err) {
           await undoMovements(undoOld);
           throw err;
@@ -791,6 +809,8 @@ export const updateSalesInvoice = async (req, res) => {
       }
       req.body.stockApplied = true;
       req.body.stockWarehouse = newWh;
+      // Batch-managed items were re-taken: keep the batches on the saved lines
+      if (!linesChanged && applyNew.some((m) => m.allocations)) req.body.lineItems = newLines;
     }
 
     const undo = new UndoStack();

@@ -26,6 +26,10 @@ const purchaseReceiveSchema = new mongoose.Schema(
       inTransit: { type: Number, default: 0 }, // Quantity in transit
       quantityToReceive: { type: Number, default: 0 }, // Remaining quantity to receive
       itemGroupId: { type: mongoose.Schema.Types.ObjectId, ref: "ItemGroup", default: null }, // For items from groups
+      // Batch-managed items (F18): the batch these pieces start (defaults to the receive number)
+      batchNo: { type: String, default: "" },
+      mfgDate: { type: String, default: "" }, // "YYYY-MM-DD"
+      expDate: { type: String, default: "" }, // "YYYY-MM-DD"
     }],
     
     // Notes

@@ -222,7 +222,7 @@ const Nav = () => {
     }, []);
 
     const getInitialSection = useMemo(() => {
-        if (activePath === "/reports/sales" || activePath === "/reports/sales-by-invoice" || activePath === "/reports/inventory" || activePath === "/reports/income-expense" || activePath === "/securityReport" || activePath === "/Revenuereport" || activePath === "/BookingReport" || activePath === "/RentOutReport" || activePath === "/reports/sales-by-group" || activePath.startsWith("/reports/vendor-") || activePath === "/reports/stock-health" || activePath === "/reports/purchases" || activePath === "/reports/bill-profit" || activePath === "/reports/profit-loss") {
+        if (activePath === "/reports/sales" || activePath === "/reports/sales-by-invoice" || activePath === "/reports/inventory" || activePath === "/reports/income-expense" || activePath === "/securityReport" || activePath === "/Revenuereport" || activePath === "/BookingReport" || activePath === "/RentOutReport" || activePath === "/reports/sales-by-group" || activePath.startsWith("/reports/vendor-") || activePath === "/reports/expiring-batches" || activePath === "/reports/stock-health" || activePath === "/reports/purchases" || activePath === "/reports/bill-profit" || activePath === "/reports/profit-loss") {
             return "reports";
         }
         if (activePath.startsWith("/inventory") ||
@@ -337,6 +337,7 @@ const Nav = () => {
         "/reports/vendor-outstanding",
         "/reports/vendor-aging",
         "/reports/vendor-statement",
+        "/reports/expiring-batches",
         "/reports/stock-health",
         "/reports/purchases",
         "/reports/bill-profit",
@@ -488,6 +489,7 @@ const Nav = () => {
                                             <Link to="/reports/bill-profit" className={subLinkClasses('/reports/bill-profit')}><span>Bill-wise Profit</span></Link>
                                             <Link to="/reports/purchases" className={subLinkClasses('/reports/purchases')}><span>Purchase Reports</span></Link>
                                             <Link to="/reports/stock-health" className={subLinkClasses('/reports/stock-health')}><span>Stock Health</span></Link>
+                                            <Link to="/reports/expiring-batches" className={subLinkClasses('/reports/expiring-batches')}><span>Expiring Batches</span></Link>
                                         </div>
                                     )}
                                 </div>
@@ -646,6 +648,7 @@ const Nav = () => {
                                                     <Link to="/reports/bill-profit" className={subLinkClasses('/reports/bill-profit')}><span>Bill-wise Profit</span></Link>
                                                     <Link to="/reports/purchases" className={subLinkClasses('/reports/purchases')}><span>Purchase Reports</span></Link>
                                                     <Link to="/reports/stock-health" className={subLinkClasses('/reports/stock-health')}><span>Stock Health</span></Link>
+                                                    <Link to="/reports/expiring-batches" className={subLinkClasses('/reports/expiring-batches')}><span>Expiring Batches</span></Link>
                                                 </>
                                             )}
                                         </div>

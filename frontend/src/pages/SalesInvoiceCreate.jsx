@@ -12,6 +12,7 @@ import RedemptionPanel from "../components/billing/RedemptionPanel";
 import useBillTabs from "../hooks/useBillTabs";
 import BillTabs from "../components/billing/BillTabs";
 import BusinessInvoicePanel, { EMPTY_B2B, b2bProblem } from "../components/billing/BusinessInvoicePanel";
+import BatchPicker from "../components/billing/BatchPicker";
 import useCompanyProfile from "../hooks/useCompanyProfile";
 import { validateGstin } from "../utils/gst";
 
@@ -1860,6 +1861,8 @@ const SalesInvoiceCreate = () => {
           rate: parseFloat(item.rate) || 0,
           tax: item.tax || "",
           amount: parseFloat(item.amount) || 0,
+          // Batch-managed items (F18): the cashier's batch choice (empty = earliest expiry)
+          ...(item.itemData?.manageBatch && item.batchNo ? { batchNo: item.batchNo } : {}),
         })),
         customerNotes,
         termsAndConditions: "", // Removed field, keeping for backward compatibility
@@ -3534,6 +3537,11 @@ Customer Service Available`;
                                     isStoreUser={storeAccess.isStoreUser}
                                     vendorFilter={vendorFilter}
                                     onItemsLoaded={collectVendorOptions}
+                                  />
+                                  <BatchPicker
+                                    line={item}
+                                    warehouse={warehouse || branch}
+                                    onChange={(b) => setLineItems((prev) => prev.map((li) => (li.id === item.id ? { ...li, batchNo: b } : li)))}
                                   />
                                   {(() => {
                                     const vps = (item.itemData?.vendorPrices || []).filter((v) => v.vendorCode);

@@ -5,6 +5,8 @@ import ItemGroup from "../model/ItemGroup.js";
 import { nextPurchaseReceive } from "../utils/nextPurchaseReceive.js";
 import { updateMonthlyStockForPurchase } from "../utils/monthlyStockTracking.js";
 import { resolveLine, moveStock, getStock, applyLines, StockError } from "../utils/stockService.js";
+import { normBatchNo } from "../utils/batches.js";
+import mongoose from "mongoose";
 
 // Helper function to map locName to warehouse name (same as other controllers)
 const mapLocNameToWarehouse = (locName) => {
@@ -88,7 +90,7 @@ const matchesWarehouse = (itemWarehouse, targetWarehouse) => {
 // Move stock for a receive line through the central stock service.
 // operation: "add" (+qty), "subtract" (-qty), "adjust" (qty is already the signed difference).
 // The old helpers ignored "subtract" and ADDED the quantity again when a receive was reverted.
-const prStockMove = async (ref, receivedQty, operation, targetWarehouse) => {
+const prStockMove = async (ref, receivedQty, operation, targetWarehouse, batch = null) => {
   const wh = targetWarehouse || "Warehouse";
   const q = parseFloat(receivedQty) || 0;
   const delta = operation === "subtract" ? -Math.abs(q) : operation === "adjust" ? q : Math.abs(q);
@@ -96,7 +98,10 @@ const prStockMove = async (ref, receivedQty, operation, targetWarehouse) => {
   try {
     const target = await resolveLine(ref);
     if (!target) return { success: false, message: `Item "${ref.itemName || ref.itemId}" not found` };
-    await moveStock(target, wh, delta);
+    // Batch-managed items (F18): adding starts/extends the line's batch; removing takes from it
+    // (receives saved before batches existed have no batch number: earliest expiry first)
+    const batchOpts = !batch ? {} : delta > 0 ? { batch } : batch.stored ? { batchNo: batch.batchNo } : {};
+    await moveStock(target, wh, delta, batchOpts);
     if (delta > 0 && target.kind === "group") {
       try {
         await updateMonthlyStockForPurchase(String(target.groupId), String(target.itemId), wh, delta, target.name);
@@ -115,8 +120,34 @@ const prStockMove = async (ref, receivedQty, operation, targetWarehouse) => {
   }
 };
 
-const updateItemStock = (itemIdValue, receivedQty, operation = "add", itemName = null, itemGroupId = null, targetWarehouse = null) =>
-  prStockMove({ itemId: itemIdValue, itemGroupId, itemName }, receivedQty, operation, targetWarehouse);
+const updateItemStock = (itemIdValue, receivedQty, operation = "add", itemName = null, itemGroupId = null, targetWarehouse = null, batch = null) =>
+  prStockMove({ itemId: itemIdValue, itemGroupId, itemName }, receivedQty, operation, targetWarehouse, batch);
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Batch details of a receive line (F18). stored = the line itself saved a batch number.
+const receiveBatchOf = (item, receiveNumber) => ({
+  batchNo: normBatchNo(item?.batchNo) || normBatchNo(receiveNumber),
+  mfgDate: DAY_RE.test(item?.mfgDate || "") ? item.mfgDate : "",
+  expDate: DAY_RE.test(item?.expDate || "") ? item.expDate : "",
+  source: `receive ${receiveNumber || ""}`.trim(),
+  stored: !!normBatchNo(item?.batchNo),
+});
+
+/** Batch-managed lines without a batch number get the receive number; dates must be YYYY-MM-DD. */
+const prepareReceiveBatches = async (items, receiveNumber) => {
+  const ids = (items || []).map((i) => String(i?.itemId?._id || i?.itemId || "")).filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const batched = new Set((await ShoeItem.find({ _id: { $in: ids }, manageBatch: true }).select("_id").lean()).map((d) => String(d._id)));
+  for (const item of items || []) {
+    for (const k of ["mfgDate", "expDate"]) {
+      if (item?.[k] && !DAY_RE.test(item[k])) return `${k === "expDate" ? "Expiry" : "Manufacturing"} date of "${item.itemName || "an item"}" must be YYYY-MM-DD.`;
+    }
+    if (item?.mfgDate && item?.expDate && item.expDate < item.mfgDate) return `Expiry of "${item.itemName || "an item"}" is before its manufacturing date.`;
+    if (batched.has(String(item?.itemId?._id || item?.itemId || ""))) item.batchNo = normBatchNo(item.batchNo) || normBatchNo(receiveNumber);
+    else if (item) item.batchNo = normBatchNo(item.batchNo);
+  }
+  return null;
+};
 
 const updateItemStockByName = (itemGroupId, itemName, receivedQty, operation = "add", itemSku = null, targetWarehouse = null) =>
   prStockMove({ itemGroupId, itemName, itemSku }, receivedQty, operation, targetWarehouse);
@@ -365,6 +396,9 @@ export const createPurchaseReceive = async (req, res) => {
     
     // Add warehouse to receiveData before saving
     receiveData.toWarehouse = targetWarehouse;
+
+    const batchError = await prepareReceiveBatches(receiveData.items, receiveData.receiveNumber);
+    if (batchError) return res.status(400).json({ message: batchError });
     
     // Save all data to MongoDB
     const purchaseReceive = await PurchaseReceive.create(receiveData);
@@ -430,7 +464,7 @@ export const createPurchaseReceive = async (req, res) => {
             // If itemId is null, we'll use itemGroupId + itemName + itemSku to find the item
             let result;
             if (itemIdValue) {
-              result = await updateItemStock(itemIdValue, receivedQty, 'add', itemName, itemGroupId, targetWarehouse);
+              result = await updateItemStock(itemIdValue, receivedQty, 'add', itemName, itemGroupId, targetWarehouse, receiveBatchOf(item, purchaseReceive.receiveNumber));
             } else if (itemGroupId && itemName) {
               result = await updateItemStockByName(itemGroupId, itemName, receivedQty, 'add', itemSku, targetWarehouse);
             } else if (itemName) {
@@ -664,6 +698,8 @@ export const updatePurchaseReceive = async (req, res) => {
     const newStatus = receiveData.status || oldStatus;
     const oldItems = oldPurchaseReceive.items || [];
     const newItems = receiveData.items || [];
+    const batchError = await prepareReceiveBatches(receiveData.items, oldPurchaseReceive.receiveNumber);
+    if (batchError) return res.status(400).json({ message: batchError });
     
     console.log(`   Old status: ${oldStatus}, New status: ${newStatus}`);
     console.log(`   Old items: ${oldItems.length}, New items: ${newItems.length}`);
@@ -893,7 +929,7 @@ export const updatePurchaseReceive = async (req, res) => {
             if (itemIdValue) {
               // Item has an ID, use normal update
               console.log(`   Using itemId to update stock: ${itemIdValue}`);
-              result = await updateItemStock(itemIdValue, qtyToUpdate, operation, itemName, itemGroupId, targetWarehouse);
+              result = await updateItemStock(itemIdValue, qtyToUpdate, operation, itemName, itemGroupId, targetWarehouse, receiveBatchOf(item, oldPurchaseReceive?.receiveNumber || req.body?.receiveNumber));
             } else if (itemGroupId && itemName) {
               // ItemId is null but we have itemGroupId and itemName, find by name and SKU
               console.log(`   ItemId is null, searching by name "${itemName}"${itemSku ? ` and SKU "${itemSku}"` : ''} in group ${itemGroupId}`);
@@ -968,7 +1004,7 @@ export const updatePurchaseReceive = async (req, res) => {
             // Get itemGroupId if available (for items from groups)
             let result;
             if (itemIdValue) {
-              result = await updateItemStock(itemIdValue, oldReceivedQty, 'subtract', itemName, itemGroupId, targetWarehouse);
+              result = await updateItemStock(itemIdValue, oldReceivedQty, 'subtract', itemName, itemGroupId, targetWarehouse, receiveBatchOf(oldItem, oldPurchaseReceive?.receiveNumber));
             } else if (itemGroupId && itemName) {
               result = await updateItemStockByName(itemGroupId, itemName, oldReceivedQty, 'subtract', itemSku, targetWarehouse);
             } else if (itemName) {
@@ -1049,6 +1085,7 @@ export const deletePurchaseReceive = async (req, res) => {
         itemSku: it.itemSku || it.sku,
         itemName: it.itemName,
         received: it.received,
+        batchNo: it.batchNo || undefined, // batch-managed items: take back the batch this receive started (F18)
       }));
       try {
         removed = await applyLines(lines, existing.toWarehouse || "Warehouse", -1, { qtyField: "received" });
@@ -1159,7 +1196,7 @@ export const sendPurchaseReceive = async (req, res) => {
 
         try {
           if (itemIdValue) {
-            const result = await updateItemStock(itemIdValue, receivedQty, "add", itemName, itemGroupId, targetWarehouse);
+            const result = await updateItemStock(itemIdValue, receivedQty, "add", itemName, itemGroupId, targetWarehouse, receiveBatchOf(item, purchaseReceive.receiveNumber));
             stockUpdateSummary.push({
               itemId: itemIdValue,
               itemName,
