@@ -147,6 +147,9 @@ const ItemGroupSchema = new mongoose.Schema(
           type: String,
           trim: true,
         },
+        // Stock health (F14): stock above this is overstock (null = not set); manual ABC class ("" = computed)
+        maxStock: { type: Number, default: null, min: 0 },
+        abcOverride: { type: String, enum: ["", "A", "B", "C"], default: "" },
         sac: {
           type: String,
           trim: true,

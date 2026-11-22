@@ -859,6 +859,9 @@ export const updateItemGroup = async (req, res) => {
           // Per-vendor quantities are stock too — keep the database values
           if (existingItem.vendorPrices?.length) item.vendorPrices = existingItem.vendorPrices;
           if (existingItem.vendorItemNames?.length) item.vendorItemNames = existingItem.vendorItemNames;
+          // Stock-health settings (F14) are set on the Stock Health screen; the item form does not send them
+          if (item.maxStock === undefined && existingItem.maxStock !== undefined) item.maxStock = existingItem.maxStock;
+          if (item.abcOverride === undefined && existingItem.abcOverride !== undefined) item.abcOverride = existingItem.abcOverride;
           return item;
         }
         // If warehouseStocks is not provided in the update, preserve from existing item

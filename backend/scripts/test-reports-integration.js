@@ -9,6 +9,7 @@ import Store from "../model/Store.js";
 import { profitAndLoss, profitStock } from "../controllers/ProfitLossController.js";
 import { billWiseProfit, billProfitDetail } from "../controllers/BillProfitController.js";
 import { purchaseSummary, purchasesByItemVendor, gstPurchaseRegister } from "../controllers/PurchaseReportController.js";
+import { deadStockReport, overstockReport, abcReport, updateStockSettings } from "../controllers/StockHealthController.js";
 import { istDateString } from "../utils/ist.js";
 
 const uri = process.env.TEST_MONGODB_URI || "";
@@ -210,6 +211,59 @@ r = await call(gstPurchaseRegister, { query: { userId: ADMIN, fromDate: FROM, to
 eq("GST register: rate filter", r.body.rows.map((x) => [x.billNumber, x.rate]), [["P-1", 18]]);
 r = await call(gstPurchaseRegister, { query: { userId: STAFF, fromDate: FROM, toDate: TO } });
 eq("GST register: store user sees only their store", r.body.rows.map((x) => x.billNumber), ["P-1", "P-1"]);
+
+// ═══ F14 Stock health ═══
+// A pendant (₹2,000 cost, 1 at Store One) never sold, and an item with no stock
+const itemP = new mongoose.Types.ObjectId();
+await db.collection("shoeitems").insertMany([
+  { _id: itemP, itemName: "Pendant", sku: "PEND-1", category: "other", costPrice: 2000, warehouseStocks: [{ warehouse: "Store One", stockOnHand: 1 }] },
+  { itemName: "Empty", sku: "EMPTY-1", category: "other", costPrice: 10, warehouseStocks: [{ warehouse: "Store One", stockOnHand: 0 }] },
+]);
+// Last sales: Ring, Chain, Bangle 5 days ago; Pendant never
+r = await call(deadStockReport, { query: { userId: ADMIN, days: "30" } });
+eq("dead stock (30 days): only the never-sold pendant", r.body.rows.map((x) => [x.name, x.stock, x.value, x.lastSaleDate]), [["Pendant", 1, 2000, null]]);
+r = await call(deadStockReport, { query: { userId: ADMIN, days: "3" } });
+eq("dead stock (3 days): everything with stock, by value", r.body.rows.map((x) => [x.name, x.daysSinceLastSale]), [["Ring", 5], ["Pendant", null], ["Bangle 2.4", 5], ["Chain", 5]]);
+eq("dead stock totals", pick(r.body.totals, ["items", "qty", "value"]), [4, 21, 9000 + 2000 + 2000 + 1500]);
+r = await call(deadStockReport, { query: { userId: ADMIN, days: "30", locCode: "T02" } });
+eq("dead stock at Store Two (30 days): none", r.body.rows.length, 0);
+r = await call(deadStockReport, { query: { userId: STAFF, days: "3", locCode: "T02" } });
+eq("dead stock: store user asking for another store → 403", r.status, 403);
+r = await call(deadStockReport, { query: { userId: ADMIN, days: "0" } });
+eq("dead stock: days must be 1–3650", r.status, 400);
+
+// Max stock: Ring 8, Bangle 1 (admin only)
+r = await call(updateStockSettings, { params: { id: String(itemR) }, body: { userId: STAFF, kind: "item", maxStock: 8 } });
+eq("max stock: store user cannot set it", r.status, 403);
+r = await call(updateStockSettings, { params: { id: String(itemR) }, body: { userId: ADMIN, kind: "item", maxStock: -1 } });
+eq("max stock: negative refused", r.status, 400);
+r = await call(updateStockSettings, { params: { id: String(itemR) }, body: { userId: ADMIN, kind: "item", maxStock: 8 } });
+eq("max stock: set on an item", [r.status, r.body.maxStock], [200, 8]);
+r = await call(updateStockSettings, { params: { id: String(itemB) }, body: { userId: ADMIN, kind: "group", groupId: String(groupB), maxStock: 1 } });
+eq("max stock: set on a group variant", [r.status, r.body.maxStock], [200, 1]);
+const ringAfter = await db.collection("shoeitems").findOne({ _id: itemR });
+eq("max stock: stock untouched", ringAfter.warehouseStocks.map((w) => w.stockOnHand), [10, 5]);
+r = await call(overstockReport, { query: { userId: ADMIN } });
+eq("overstock (all stores): Ring 15 > 8, Bangle 2 > 1", r.body.rows.map((x) => [x.name, x.stock, x.maxStock, x.excess, x.excessValue]), [["Ring", 15, 8, 7, 4200], ["Bangle 2.4", 2, 1, 1, 1000]]);
+r = await call(overstockReport, { query: { userId: STAFF } });
+eq("overstock (Store One): Ring 10 > 8", r.body.rows.map((x) => [x.name, x.excess]), [["Ring", 2], ["Bangle 2.4", 1]]);
+r = await call(overstockReport, { query: { userId: ADMIN, all: "1" } });
+eq("overstock all=1 lists items with stock or a limit", r.body.rows.map((x) => x.name).sort(), ["Bangle 2.4", "Chain", "Pendant", "Ring"]);
+
+// ABC over the last 12 months (net of returns): Ring 2,000 + 1,000 + 1,000 + 1,000 (INV-6 as sold) − 1,000 (RTN-2) = 4,000;
+// Bangle 2,000; Chain 3,000 − 1,000 = 2,000; Pendant 0. Total 8,000 → Ring 50% A, Bangle 75% A, Chain 100% C, Pendant C
+r = await call(abcReport, { query: { userId: ADMIN } });
+eq("ABC: sales value, cumulative share and class", r.body.rows.map((x) => [x.name, x.salesValue, x.cumulative, x.abcClass]),
+  [["Ring", 4000, 50, "A"], ["Bangle 2.4", 2000, 75, "A"], ["Chain", 2000, 100, "C"], ["Pendant", 0, 100, "C"]]);
+r = await call(updateStockSettings, { params: { id: String(itemC) }, body: { userId: ADMIN, kind: "item", abcOverride: "D" } });
+eq("ABC override: only A/B/C/empty", r.status, 400);
+await call(updateStockSettings, { params: { id: String(itemC) }, body: { userId: ADMIN, kind: "item", abcOverride: "B" } });
+r = await call(abcReport, { query: { userId: ADMIN } });
+const chainAbc = r.body.rows.find((x) => x.name === "Chain");
+eq("ABC override wins over the computed class", [chainAbc.computedClass, chainAbc.abcClass], ["C", "B"]);
+eq("ABC summary per class", r.body.summary.map((x) => [x.abcClass, x.items, x.value, x.share]), [["A", 2, 6000, 75], ["B", 1, 2000, 25], ["C", 1, 0, 0]]);
+r = await call(abcReport, { query: { userId: STAFF } });
+eq("ABC: store user = their store's sales", [r.body.total, r.body.rows.find((x) => x.name === "Ring").salesValue], [7000, 3000]);
 
 // ═══ (later features add their checks above this line) ═══
 
