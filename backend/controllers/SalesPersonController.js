@@ -5,11 +5,24 @@ import mongoose from "mongoose";
 // Create a new sales person
 export const createSalesPerson = async (req, res) => {
   try {
-    const salesPersonData = req.body;
-    
+    const salesPersonData = { ...req.body };
+    delete salesPersonData.userId;
+
+    // The employee screen sends a locCode (and store name) instead of the Mongo store id:
+    // find that store, or create it the same way the billing screen does.
+    if (!salesPersonData.storeId && salesPersonData.locCode) {
+      const locCode = String(salesPersonData.locCode).trim();
+      let store = await Store.findOne({ locCode });
+      if (!store) {
+        store = await Store.create({ name: String(salesPersonData.storeName || locCode).trim(), locCode });
+      }
+      salesPersonData.storeId = String(store._id);
+    }
+    delete salesPersonData.storeName;
+
     if (!salesPersonData.firstName || !salesPersonData.employeeId || !salesPersonData.storeId) {
-      return res.status(400).json({ 
-        message: "First name, employee ID, and store ID are required" 
+      return res.status(400).json({
+        message: "Name, employee ID, and store are required"
       });
     }
     
@@ -159,8 +172,20 @@ export const getSalesPersonById = async (req, res) => {
 export const updateSalesPerson = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = req.body;
-    
+    const updateData = { ...req.body };
+    delete updateData.userId;
+
+    // Moving to another store by locCode (employee screen): resolve it to the Mongo store id.
+    if (!updateData.storeId && updateData.locCode) {
+      const locCode = String(updateData.locCode).trim();
+      let store = await Store.findOne({ locCode });
+      if (!store) {
+        store = await Store.create({ name: String(updateData.storeName || locCode).trim(), locCode });
+      }
+      updateData.storeId = String(store._id);
+    }
+    delete updateData.storeName;
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid sales person ID" });
     }

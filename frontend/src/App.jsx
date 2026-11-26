@@ -88,6 +88,7 @@ import VendorAging from "./pages/VendorAging.jsx";
 import VendorStatement from "./pages/VendorStatement.jsx";
 import StockHealth from "./pages/StockHealth.jsx";
 import Attendance from "./pages/Attendance.jsx";
+import Employees from "./pages/Employees.jsx";
 import Enquiries from "./pages/Enquiries.jsx";
 import EnquiryDetail from "./pages/EnquiryDetail.jsx";
 import BankAccounts from "./pages/BankAccounts.jsx";
@@ -324,6 +325,7 @@ const App = () => {
           <Route path="/reports/vendor-aging" element={currentuser ? <VendorAging /> : <Navigate to="/login" />} />
           <Route path="/reports/vendor-statement" element={currentuser ? <VendorStatement /> : <Navigate to="/login" />} />
           <Route path="/reports/stock-health" element={currentuser ? <StockHealth /> : <Navigate to="/login" />} />
+          <Route path="/staff/employees" element={currentuser ? <Employees /> : <Navigate to="/login" />} />
           <Route path="/staff/attendance" element={currentuser ? <Navigate to="/staff/attendance/mark" replace /> : <Navigate to="/login" />} />
           <Route path="/staff/attendance/:view" element={currentuser ? <Attendance /> : <Navigate to="/login" />} />
           <Route path="/sales/enquiries" element={currentuser ? <Enquiries /> : <Navigate to="/login" />} />

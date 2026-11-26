@@ -300,6 +300,7 @@ const Nav = () => {
     const isOffersActive = activePath.startsWith("/offers");
     // Staff (F15): attendance screens
     const staffLinks = [
+        { to: "/staff/employees", label: "Employees" },
         { to: "/staff/attendance/mark", label: "Mark Attendance" },
         { to: "/staff/attendance/daily", label: "Daily Attendance" },
         { to: "/staff/attendance/monthly", label: "Monthly Attendance" },

@@ -96,7 +96,7 @@ const MarkView = ({ store, date, setDate }) => {
         {notice && <p className="text-xs font-semibold text-[#15803d]">{notice}</p>}
         {error && <p className="text-xs font-semibold text-red-600">{error}</p>}
         <section className={`${ui.card} overflow-x-auto`}>
-          {loading && !day ? <Msg>Loading…</Msg> : !day ? <Msg>Choose a store.</Msg> : !day.rows.length ? <Msg>This store has no active staff. Staff are added from the billing screen&apos;s salesperson list.</Msg> : (
+          {loading && !day ? <Msg>Loading…</Msg> : !day ? <Msg>Choose a store.</Msg> : !day.rows.length ? <Msg>This store has no active staff. Add staff on the Staff → Employees page.</Msg> : (
             <table className="min-w-full border-collapse">
               <thead><tr className={ui.theadRow}>
                 <th className={ui.th}>Staff</th><th className={ui.th}>Status</th>
